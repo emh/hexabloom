@@ -163,7 +163,7 @@ function renderLeaderboard() {
     <div class="leaderboard-row">
       <span>${index + 1}</span>
       <strong>${esc(player.name)}</strong>
-      <span>${player.wordCount}</span>
+      <span>${player.turnCount}</span>
       <span>${player.score}</span>
     </div>
   `).join("") : '<p class="leaderboard-empty">No players yet.</p>';
@@ -177,7 +177,7 @@ function renderLeaderboard() {
       <div class="leaderboard-row leaderboard-heading" role="row">
         <span>#</span>
         <span>player</span>
-        <span>words</span>
+        <span>turns</span>
         <span>score</span>
       </div>
       ${rows}
@@ -186,15 +186,14 @@ function renderLeaderboard() {
 }
 
 function leaderboardPlayers() {
-  const wordCounts = new Map();
+  const turnCounts = new Map();
   for (const move of game.moves || []) {
-    const count = Array.isArray(move.words) ? move.words.length : 0;
-    wordCounts.set(move.playerId, (wordCounts.get(move.playerId) || 0) + count);
+    turnCounts.set(move.playerId, (turnCounts.get(move.playerId) || 0) + 1);
   }
 
   return orderedPlayers(game.players).map(player => ({
     ...player,
-    wordCount: wordCounts.get(player.id) || 0
+    turnCount: turnCounts.get(player.id) || 0
   }));
 }
 
