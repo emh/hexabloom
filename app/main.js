@@ -18,7 +18,7 @@ import { loadAppState, saveAppState } from "./storage.js";
 import { GameSync, joinRemoteGame } from "./sync.js";
 
 const HEX_SIZE = 34;
-const MIN_SCALE = 0.55;
+const MIN_SCALE = 0.35;
 const MAX_SCALE = 2.4;
 const SQRT3 = Math.sqrt(3);
 const CURRENT_PLAYER_COLOR = "#0072b2";
@@ -29,6 +29,7 @@ applyLinkedSessionFromUrl(appState);
 const ui = {
   screen: appState.session?.playerName ? null : "setup",
   leaderboardOpen: false,
+  historyOpen: false,
   syncStatus: "idle",
   localOnly: false,
   staged: [],
@@ -113,21 +114,25 @@ function renderAll() {
   const showSetup = Boolean(ui.screen);
   $("setup-screen").classList.toggle("active", showSetup);
   $("leaderboard-screen").classList.toggle("active", ui.leaderboardOpen && !showSetup);
+  $("history-screen").classList.toggle("active", ui.historyOpen && !showSetup);
   $("app").hidden = showSetup || !appState.session;
 
   if (showSetup) {
     ui.leaderboardOpen = false;
+    ui.historyOpen = false;
     $("leaderboard-screen").classList.remove("active");
+    $("history-screen").classList.remove("active");
     document.body.classList.add("no-scroll");
     renderSetup();
     return;
   }
 
-  document.body.classList.toggle("no-scroll", ui.leaderboardOpen);
+  document.body.classList.toggle("no-scroll", ui.leaderboardOpen || ui.historyOpen);
   renderHud();
   renderTray();
   renderPreview();
   renderLeaderboard();
+  renderHistory();
   queueResizeCanvas();
 }
 
@@ -203,6 +208,8 @@ function renderHud() {
     <span>${occupied} tiles</span>
     <span>·</span>
     <button class="inline-link" type="button" data-action="open-leaderboard">${esc(playerLabel)}</button>
+    <span>·</span>
+    <button class="inline-link" type="button" data-action="open-history">history</button>
   `;
   $("switch-session-btn").textContent = player ? player.name : "join";
   $("switch-session-btn").hidden = false;
@@ -245,6 +252,75 @@ function renderLeaderboard() {
       ${rows}
     </div>
   `;
+}
+
+function renderHistory() {
+  const entries = moveHistoryEntries();
+  const rows = entries.length ? entries.map(entry => `
+    <div class="history-row">
+      <span>${entry.index}</span>
+      <strong>${esc(entry.primary)}</strong>
+      <span>${esc(entry.playerName)}</span>
+      <span>${entry.additional.length ? esc(entry.additional.join(", ")) : "-"}</span>
+      <span>${entry.score}</span>
+    </div>
+  `).join("") : '<p class="leaderboard-empty">No words yet.</p>';
+
+  $("history-content").innerHTML = `
+    <div class="overlay-header">
+      <h2>history</h2>
+      <button class="action-link muted" type="button" data-action="close-history">Close</button>
+    </div>
+    <div class="history-table" role="table" aria-label="Word history">
+      <div class="history-row history-heading" role="row">
+        <span>#</span>
+        <span>word</span>
+        <span>player</span>
+        <span>also</span>
+        <span>points</span>
+      </div>
+      ${rows}
+    </div>
+  `;
+}
+
+function moveHistoryEntries() {
+  return (game.moves || []).map((move, index) => {
+    const words = moveWords(move);
+    const primaryIndex = primaryWordIndex(move, words);
+    const player = game.players?.[move.playerId];
+
+    return {
+      index: index + 1,
+      primary: words[primaryIndex]?.text || "single tile",
+      additional: words.filter((_, wordIndex) => wordIndex !== primaryIndex).map(word => word.text),
+      playerName: move.playerName || player?.name || "unknown",
+      score: Math.max(0, Number.parseInt(move.score, 10) || 0)
+    };
+  }).reverse();
+}
+
+function moveWords(move) {
+  return Array.isArray(move.words)
+    ? move.words
+      .map(word => ({
+        text: String(word?.text || ""),
+        keys: Array.isArray(word?.keys) ? word.keys.map(String) : []
+      }))
+      .filter(word => word.text)
+    : [];
+}
+
+function primaryWordIndex(move, words) {
+  if (!words.length) return -1;
+
+  const placementKeys = (move.placements || []).map(placement => hexKey(placement.q, placement.r));
+  if (placementKeys.length) {
+    const index = words.findIndex(word => placementKeys.every(key => word.keys.includes(key)));
+    if (index >= 0) return index;
+  }
+
+  return 0;
 }
 
 function leaderboardPlayers() {
@@ -663,7 +739,11 @@ function rackDropIndexFromClient(clientX, clientY) {
     start += row.items.length;
   }
 
-  const row = rows.find(candidate => clientY <= candidate.bottom) || rows[rows.length - 1];
+  const row = rows.reduce((closest, candidate) => {
+    const center = candidate.top + (candidate.bottom - candidate.top) / 2;
+    const distance = Math.abs(clientY - center);
+    return distance < closest.distance ? { row: candidate, distance } : closest;
+  }, { row: rows[0], distance: Infinity }).row;
   const column = row.items.findIndex(entry => clientX < entry.rect.left + entry.rect.width / 2);
   return row.start + (column >= 0 ? column : row.items.length);
 }
@@ -1041,9 +1121,17 @@ function wireEvents() {
 
   $("room-line").addEventListener("click", event => {
     const action = event.target.closest("[data-action]")?.dataset.action;
-    if (action !== "open-leaderboard") return;
-    ui.leaderboardOpen = true;
-    renderAll();
+    if (action === "open-leaderboard") {
+      ui.leaderboardOpen = true;
+      ui.historyOpen = false;
+      renderAll();
+    }
+
+    if (action === "open-history") {
+      ui.historyOpen = true;
+      ui.leaderboardOpen = false;
+      renderAll();
+    }
   });
 
   $("leaderboard-screen").addEventListener("click", event => {
@@ -1054,10 +1142,19 @@ function wireEvents() {
     }
   });
 
+  $("history-screen").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action === "close-history" || event.target.id === "history-screen") {
+      ui.historyOpen = false;
+      renderAll();
+    }
+  });
+
   $("switch-session-btn").addEventListener("click", () => {
     sync?.stop();
     ui.screen = "setup";
     ui.leaderboardOpen = false;
+    ui.historyOpen = false;
     renderAll();
   });
 

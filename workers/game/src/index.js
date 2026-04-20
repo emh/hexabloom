@@ -1,4 +1,4 @@
-import { GLOBAL_ROOM_ID, GameRuleError, applyMove, createGameState, joinGame, normalizeRoomId, normalizeWord, resetGameState } from "../../../app/model.js";
+import { GLOBAL_ROOM_ID, GameRuleError, RACK_SIZE, applyMove, createGameState, joinGame, normalizeRoomId, normalizeWord, resetGameState } from "../../../app/model.js";
 import { DICTIONARY_WORDS } from "./dictionary.generated.js";
 
 const MOVE_VALIDATION = {
@@ -14,7 +14,9 @@ export class GameRoom {
   }
 
   async initialize() {
-    this.game = createGameState(await this.state.storage.get("game") || {});
+    const storedGame = await this.state.storage.get("game") || {};
+    this.game = createGameState(storedGame);
+    if (hasOversizedRacks(storedGame)) await this.save();
   }
 
   async fetch(request) {
@@ -282,6 +284,10 @@ function sameStringSet(left, right) {
   if (left.length !== right.length) return false;
   const rightSet = new Set(right);
   return left.every(value => rightSet.has(value)) && new Set(left).size === rightSet.size;
+}
+
+function hasOversizedRacks(game) {
+  return Object.values(game?.players || {}).some(player => Array.isArray(player?.rack) && player.rack.length > RACK_SIZE);
 }
 
 function isPrivateDevOrigin(origin) {

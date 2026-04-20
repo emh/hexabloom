@@ -1,6 +1,6 @@
 export const EDGE_BUFFER = 6;
 export const INITIAL_RADIUS = 5;
-export const RACK_SIZE = 12;
+export const RACK_SIZE = 11;
 export const GLOBAL_ROOM_ID = "BOARD";
 
 export const DIRECTIONS = [
@@ -180,11 +180,18 @@ export function createTileBag(seed = createId()) {
 export function createPlayer(input = {}) {
   const id = String(input.id || createId());
   const name = normalizePlayerName(input.name) || "Player";
-  const bag = Array.isArray(input.remainingBag) || Array.isArray(input.rack)
-    ? normalizeTiles([...(input.rack || []), ...(input.remainingBag || [])])
-    : createTileBag(input.seed || `${id}:${name}`);
-  const rack = Array.isArray(input.rack) ? normalizeTiles(input.rack).slice(0, RACK_SIZE) : bag.splice(0, RACK_SIZE);
-  const remainingBag = Array.isArray(input.remainingBag) ? normalizeTiles(input.remainingBag) : bag;
+  let rack;
+  let remainingBag;
+
+  if (Array.isArray(input.rack)) {
+    rack = normalizeTiles(input.rack);
+    remainingBag = Array.isArray(input.remainingBag) ? normalizeTiles(input.remainingBag) : [];
+    ({ rack, remainingBag } = returnOverflowRackTiles(rack, remainingBag, `${id}:${name}`));
+  } else {
+    const bag = Array.isArray(input.remainingBag) ? normalizeTiles(input.remainingBag) : createTileBag(input.seed || `${id}:${name}`);
+    rack = bag.splice(0, RACK_SIZE);
+    remainingBag = bag;
+  }
 
   const player = {
     id,
@@ -312,6 +319,7 @@ export function applyMove(inputState, inputMove, options = {}) {
 
   const moveRecord = {
     ...validation.move,
+    playerName: player.name,
     score: validation.score,
     words: validation.words.map(word => ({
       text: word.text,
@@ -364,7 +372,7 @@ export function validateMove(inputState, inputMove, options = {}) {
     seenTiles.add(placement.tileId);
   }
 
-  const axis = placementAxis(move.placements);
+  const axis = placementAxis(move.placements, state.board);
   const boardHasTiles = Object.keys(state.board).length > 0;
   const connected = move.placements.some(placement => neighbors(placement).some(hex => state.board[hexKey(hex.q, hex.r)]));
   const draftBoard = boardWithPlacements(state.board, move.placements, player, tilesById, move);
@@ -393,7 +401,7 @@ export function validateMove(inputState, inputMove, options = {}) {
   };
 }
 
-export function placementAxis(placements) {
+export function placementAxis(placements, board = {}) {
   if (placements.length <= 1) return null;
 
   for (let axisIndex = 0; axisIndex < AXES.length; axisIndex += 1) {
@@ -401,9 +409,13 @@ export function placementAxis(placements) {
     if (!placements.every(hex => lineInvariant(hex, axisIndex) === invariant)) continue;
 
     const positions = placements.map(hex => linePosition(hex, axisIndex)).sort((left, right) => left - right);
+    const placedPositions = new Set(positions);
+    if (placedPositions.size !== positions.length) continue;
+
     let contiguous = true;
-    for (let index = 1; index < positions.length; index += 1) {
-      if (positions[index] !== positions[index - 1] + 1) {
+    for (let position = positions[0]; position <= positions[positions.length - 1]; position += 1) {
+      const hex = hexOnLine(axisIndex, invariant, position);
+      if (!placedPositions.has(position) && !board[hexKey(hex.q, hex.r)]) {
         contiguous = false;
         break;
       }
@@ -535,6 +547,42 @@ export function drawRack(player) {
   }
 }
 
+function returnOverflowRackTiles(rack, remainingBag, seed) {
+  if (rack.length <= RACK_SIZE) return { rack, remainingBag };
+
+  const overflowCount = rack.length - RACK_SIZE;
+  const rackIds = rack.map(tile => tile.id).join(",");
+  const shuffledIndexes = shuffleWithSeed(rack.map((_, index) => index), `${seed}:rack-overflow:${rackIds}`);
+  const returnedIndexes = new Set(shuffledIndexes.slice(0, overflowCount));
+  const keptRack = [];
+  const returnedTiles = [];
+
+  for (let index = 0; index < rack.length; index += 1) {
+    if (returnedIndexes.has(index)) {
+      returnedTiles.push(rack[index]);
+    } else {
+      keptRack.push(rack[index]);
+    }
+  }
+
+  return {
+    rack: keptRack,
+    remainingBag: insertTilesIntoBag(remainingBag, returnedTiles, `${seed}:bag-overflow:${rackIds}`)
+  };
+}
+
+function insertTilesIntoBag(bag, tiles, seed) {
+  const result = bag.slice();
+  const random = seededRandom(hashString(seed));
+
+  for (const tile of shuffleWithSeed(tiles, `${seed}:order`)) {
+    const index = Math.floor(random() * (result.length + 1));
+    result.splice(index, 0, tile);
+  }
+
+  return result;
+}
+
 function normalizeMove(input = {}) {
   return {
     id: String(input.id || createId()),
@@ -554,6 +602,7 @@ function normalizeMoveRecord(input = {}) {
   if (!input || typeof input !== "object" || !input.id) return null;
   return {
     ...normalizeMove(input),
+    playerName: normalizePlayerName(input.playerName),
     score: Math.max(0, Number.parseInt(input.score, 10) || 0),
     words: Array.isArray(input.words) ? input.words : []
   };
@@ -629,6 +678,12 @@ function lineInvariant(hex, axisIndex) {
 function linePosition(hex, axisIndex) {
   if (axisIndex === 1) return hex.r;
   return hex.q;
+}
+
+function hexOnLine(axisIndex, invariant, position) {
+  if (axisIndex === 0) return { q: position, r: invariant };
+  if (axisIndex === 1) return { q: invariant, r: position };
+  return { q: position, r: invariant - position };
 }
 
 function shuffleWithSeed(items, seedValue) {

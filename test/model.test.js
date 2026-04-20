@@ -55,6 +55,7 @@ test("first move can be free within the initial bloom", () => {
   assert.equal(result.accepted, true);
   assert.equal(result.state.board[hexKey(0, 0)].letter, "C");
   assert.equal(result.state.players.p1.score, 3);
+  assert.equal(result.move.playerName, "Ada");
   assert.equal(result.move.words[0].text, "CAT");
 });
 
@@ -94,6 +95,23 @@ test("same-player-only extensions are rejected after the first move", () => {
   ], 101)), /another player's tile/);
 });
 
+test("existing board tiles can bridge gaps between placed tiles", () => {
+  const game = gameWithPlayers();
+  forceRack(game, "p1", ["L", "I", "E"]);
+  forceRack(game, "p2", []);
+  game.board = {
+    "0,0": { q: 0, r: 0, letter: "F", value: 4, playerId: "p2", tileId: "f", timestamp: 1 }
+  };
+
+  const valid = validateMove(game, createMove("p1", [
+    { q: -2, r: 0, tileId: "p1-0" },
+    { q: -1, r: 0, tileId: "p1-1" },
+    { q: 1, r: 0, tileId: "p1-2" }
+  ], 101));
+
+  assert.equal(valid.words[0].text, "LIFE");
+});
+
 test("bounds expand from occupied hexes without remapping coordinates", () => {
   let game = gameWithPlayers();
   forceRack(game, "p1", ["A", "B", "C", "D", "E", "F"]);
@@ -126,10 +144,27 @@ test("dictionary validation checks every word formed across all three axes", () 
   assert.deepEqual(valid.words.map(word => word.text).sort(), ["BAD", "CAT", "HAT"]);
 });
 
-test("createPlayer deals twelve rack tiles and a remaining bag", () => {
+test("createPlayer deals eleven rack tiles and a remaining bag", () => {
   const player = createPlayer({ id: "p1", name: "Ada" });
-  assert.equal(player.rack.length, 12);
+  assert.equal(player.rack.length, 11);
   assert.ok(player.remainingBag.length > 80);
+});
+
+test("createPlayer returns overflow rack tiles to the bag", () => {
+  const rack = Array.from({ length: 12 }, (_, index) => ({
+    id: `tile-${index}`,
+    letter: "A",
+    value: 1
+  }));
+  const remainingBag = [{ id: "bag-0", letter: "B", value: 3 }];
+  const player = createPlayer({ id: "p1", name: "Ada", rack, remainingBag });
+
+  assert.equal(player.rack.length, 11);
+  assert.equal(player.remainingBag.length, 2);
+  assert.deepEqual(
+    [...player.rack, ...player.remainingBag].map(tile => tile.id).sort(),
+    [...rack, ...remainingBag].map(tile => tile.id).sort()
+  );
 });
 
 test("resetGameState clears board and redeals joined players", () => {
@@ -146,7 +181,7 @@ test("resetGameState clears board and redeals joined players", () => {
   assert.equal(Object.keys(reset.board).length, 0);
   assert.equal(reset.players.p1.score, 0);
   assert.equal(reset.players.p2.score, 0);
-  assert.equal(reset.players.p1.rack.length, 12);
-  assert.equal(reset.players.p2.rack.length, 12);
-  assert.equal(reset.players.p1.remainingBag.length, 86);
+  assert.equal(reset.players.p1.rack.length, 11);
+  assert.equal(reset.players.p2.rack.length, 11);
+  assert.equal(reset.players.p1.remainingBag.length, 87);
 });
