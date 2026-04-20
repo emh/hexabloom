@@ -132,7 +132,25 @@ body.no-scroll {
 }
 
 #room-line {
+  display: flex;
+  gap: 7px;
   margin-top: 8px;
+  pointer-events: auto;
+}
+
+.inline-link {
+  border: none;
+  background: none;
+  color: var(--ink-light);
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.inline-link:hover {
+  color: var(--ink-mid);
 }
 
 .header-right {
@@ -419,6 +437,69 @@ body.no-scroll {
   margin-bottom: 28px;
   color: var(--ink-light);
   font-size: 18px;
+}
+
+.overlay-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.overlay-header h2 {
+  font-size: 46px;
+  font-style: italic;
+  font-weight: 300;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.leaderboard-table {
+  border-top: 1px solid var(--rule);
+}
+
+.leaderboard-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 78px 78px;
+  gap: 12px;
+  align-items: baseline;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.leaderboard-row span {
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+}
+
+.leaderboard-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 21px;
+  font-weight: 500;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leaderboard-heading {
+  padding: 8px 0;
+}
+
+.leaderboard-heading span {
+  color: var(--ink-faint);
+}
+
+.leaderboard-empty {
+  padding: 16px 0;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10.5px;
 }
 
 .field-label {

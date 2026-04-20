@@ -27,6 +27,7 @@ const OTHER_PLAYER_COLOR = "#d55e00";
 const appState = loadAppState();
 const ui = {
   screen: appState.session?.playerName ? null : "setup",
+  leaderboardOpen: false,
   syncStatus: "idle",
   localOnly: false,
   staged: [],
@@ -92,18 +93,22 @@ function toast(message) {
 function renderAll() {
   const showSetup = Boolean(ui.screen);
   $("setup-screen").classList.toggle("active", showSetup);
+  $("leaderboard-screen").classList.toggle("active", ui.leaderboardOpen && !showSetup);
   $("app").hidden = showSetup || !appState.session;
 
   if (showSetup) {
+    ui.leaderboardOpen = false;
+    $("leaderboard-screen").classList.remove("active");
     document.body.classList.add("no-scroll");
     renderSetup();
     return;
   }
 
-  document.body.classList.remove("no-scroll");
+  document.body.classList.toggle("no-scroll", ui.leaderboardOpen);
   renderHud();
   renderTray();
   renderPreview();
+  renderLeaderboard();
   queueResizeCanvas();
 }
 
@@ -129,8 +134,13 @@ function renderHud() {
   const players = orderedPlayers(game.players);
   const leader = players[0];
   const occupied = Object.keys(game.board).length;
+  const playerLabel = `${players.length} ${players.length === 1 ? "player" : "players"}`;
 
-  $("room-line").textContent = `${occupied} tiles · ${players.length} players`;
+  $("room-line").innerHTML = `
+    <span>${occupied} tiles</span>
+    <span>·</span>
+    <button class="inline-link" type="button" data-action="open-leaderboard">${esc(playerLabel)}</button>
+  `;
   $("switch-session-btn").textContent = player ? player.name : "join";
   $("switch-session-btn").hidden = false;
 
@@ -145,6 +155,47 @@ function renderHud() {
     <span>${leader ? `leader ${esc(leader.name)} ${leader.score}` : "leader -"}</span>
     <span>${status}</span>
   `;
+}
+
+function renderLeaderboard() {
+  const players = leaderboardPlayers();
+  const rows = players.length ? players.map((player, index) => `
+    <div class="leaderboard-row">
+      <span>${index + 1}</span>
+      <strong>${esc(player.name)}</strong>
+      <span>${player.wordCount}</span>
+      <span>${player.score}</span>
+    </div>
+  `).join("") : '<p class="leaderboard-empty">No players yet.</p>';
+
+  $("leaderboard-content").innerHTML = `
+    <div class="overlay-header">
+      <h2>leaderboard</h2>
+      <button class="action-link muted" type="button" data-action="close-leaderboard">Close</button>
+    </div>
+    <div class="leaderboard-table" role="table" aria-label="Leaderboard">
+      <div class="leaderboard-row leaderboard-heading" role="row">
+        <span>#</span>
+        <span>player</span>
+        <span>words</span>
+        <span>score</span>
+      </div>
+      ${rows}
+    </div>
+  `;
+}
+
+function leaderboardPlayers() {
+  const wordCounts = new Map();
+  for (const move of game.moves || []) {
+    const count = Array.isArray(move.words) ? move.words.length : 0;
+    wordCounts.set(move.playerId, (wordCounts.get(move.playerId) || 0) + count);
+  }
+
+  return orderedPlayers(game.players).map(player => ({
+    ...player,
+    wordCount: wordCounts.get(player.id) || 0
+  }));
 }
 
 function renderTray() {
@@ -911,9 +962,25 @@ function wireEvents() {
     }
   });
 
+  $("room-line").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action !== "open-leaderboard") return;
+    ui.leaderboardOpen = true;
+    renderAll();
+  });
+
+  $("leaderboard-screen").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action === "close-leaderboard" || event.target.id === "leaderboard-screen") {
+      ui.leaderboardOpen = false;
+      renderAll();
+    }
+  });
+
   $("switch-session-btn").addEventListener("click", () => {
     sync?.stop();
     ui.screen = "setup";
+    ui.leaderboardOpen = false;
     renderAll();
   });
 
