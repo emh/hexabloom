@@ -395,9 +395,9 @@ function rackPlaceholderIndexForTile(player, hiddenIds, tileId) {
 function renderPreview() {
   const preview = getPreview();
   const strip = $("preview-strip");
-  strip.hidden = !preview.valid;
+  strip.hidden = !preview.message;
   strip.classList.toggle("valid", preview.valid);
-  strip.classList.toggle("invalid", false);
+  strip.classList.toggle("invalid", Boolean(preview.message && !preview.valid));
   strip.innerHTML = `
     <span>${esc(preview.message)}</span>
     <span>${preview.detail ? esc(preview.detail) : ""}</span>

@@ -431,7 +431,7 @@ export function placementAxis(placements, board = {}) {
     }
   }
 
-  throw new GameRuleError("Tiles must be contiguous on one hex axis");
+  throw new GameRuleError("Tiles must be played in a straight line.");
 }
 
 export function findFormedWords(board, placements) {

@@ -100,7 +100,9 @@ body.no-scroll {
   top: 0;
   right: 0;
   left: 0;
-  padding: calc(18px + env(safe-area-inset-top, 0)) 18px 0;
+  padding: calc(18px + env(safe-area-inset-top, 0)) 18px 10px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper-bright);
   pointer-events: none;
 }
 
@@ -230,8 +232,11 @@ body.no-scroll {
   gap: 18px;
   max-width: 780px;
   margin: 0 auto;
-  padding: 10px 0;
-  border-top: 1px solid var(--rule);
+  padding: 10px 14px;
+  border: 1px solid rgba(17, 17, 17, 0.24);
+  border-radius: 8px;
+  background: var(--paper-bright);
+  box-shadow: 0 8px 24px rgba(17, 17, 17, 0.12);
   color: var(--ink-light);
   pointer-events: none;
 }
@@ -242,6 +247,10 @@ body.no-scroll {
 
 .preview-strip.invalid {
   color: var(--red);
+}
+
+.preview-strip.invalid span:first-child {
+  white-space: normal;
 }
 
 .preview-strip span:first-child {
@@ -379,7 +388,8 @@ body.no-scroll {
 .tray-actions {
   display: flex;
   align-items: baseline;
-  gap: 20px;
+  justify-content: center;
+  gap: 10px;
   margin-top: 8px;
 }
 
@@ -408,6 +418,37 @@ body.no-scroll {
   color: var(--ink-mid);
 }
 
+.tray-actions .action-link {
+  min-width: 78px;
+  padding: 7px 13px;
+  border: 1px solid rgba(139, 0, 0, 0.28);
+  border-radius: 8px;
+  background: rgba(139, 0, 0, 0.055);
+  color: var(--red);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.tray-actions .action-link:hover {
+  border-color: rgba(139, 0, 0, 0.42);
+  background: rgba(139, 0, 0, 0.08);
+}
+
+.tray-actions .action-link.muted {
+  border-color: rgba(17, 17, 17, 0.2);
+  background: rgba(17, 17, 17, 0.035);
+  color: var(--ink-mid);
+}
+
+.tray-actions .action-link.muted:hover {
+  border-color: rgba(17, 17, 17, 0.32);
+  background: rgba(17, 17, 17, 0.055);
+  color: var(--ink);
+}
+
 .overlay {
   position: fixed;
   z-index: 100;
@@ -427,6 +468,11 @@ body.no-scroll {
   transition: transform 0.35s var(--ease), visibility 0s linear 0s;
 }
 
+.leaderboard-overlay,
+.history-overlay {
+  background: transparent;
+}
+
 .overlay-content {
   max-width: 640px;
   margin: 0 auto;
@@ -435,6 +481,22 @@ body.no-scroll {
 
 .history-content {
   max-width: 860px;
+}
+
+.leaderboard-content,
+.history-content {
+  width: min(640px, calc(100% - 36px));
+  margin-top: calc(24px + env(safe-area-inset-top, 0));
+  margin-bottom: calc(24px + env(safe-area-inset-bottom, 0));
+  padding: 24px;
+  border: 1px solid rgba(17, 17, 17, 0.24);
+  border-radius: 8px;
+  background: var(--paper-bright);
+  box-shadow: 0 8px 24px rgba(17, 17, 17, 0.12);
+}
+
+.history-content {
+  width: min(860px, calc(100% - 36px));
 }
 
 .setup-content h1 {
