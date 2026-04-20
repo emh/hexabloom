@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#fbfff8">
+  <meta name="application-name" content="Hexabloom">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Hexabloom">
+  <title>Hexabloom</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icons/icon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./version.js"></script>
+  <script src="./config.js"></script>
+  <script type="module" src="./main.js"></script>
+</head>
+<body>
+  <div class="overlay setup-overlay" id="setup-screen">
+    <div class="overlay-content setup-content" id="setup-content"></div>
+  </div>
+
+  <main id="app" hidden>
+    <section class="board-stage" aria-label="Hex board">
+      <canvas id="board-canvas"></canvas>
+      <div class="hud">
+        <header class="topbar">
+          <div>
+            <h1>hexabloom</h1>
+            <p id="room-line"></p>
+          </div>
+          <div class="header-right">
+            <button class="header-user" type="button" id="switch-session-btn"></button>
+            <span class="sync-dot" id="sync-dot" aria-label="not synced" title="not synced"></span>
+          </div>
+        </header>
+        <div class="stats-row" id="stats-row"></div>
+      </div>
+      <div class="preview-strip" id="preview-strip"></div>
+    </section>
+
+    <footer class="tray-panel">
+      <div class="tray-meta">
+        <span id="rack-label"></span>
+        <span id="pending-label"></span>
+      </div>
+      <div class="tile-tray" id="tile-tray" aria-label="Tile rack"></div>
+      <div class="tray-actions">
+        <button class="action-link primary" type="button" id="commit-btn">Play</button>
+        <button class="action-link" type="button" id="shuffle-btn">Shuffle</button>
+        <button class="action-link muted" type="button" id="reset-btn">Reset</button>
+      </div>
+    </footer>
+  </main>
+
+  <div class="drag-ghost" id="drag-ghost" hidden></div>
+  <div class="toast" id="toast"></div>
+</body>
+</html>

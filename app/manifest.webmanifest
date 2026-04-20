@@ -1,0 +1,16 @@
+{
+  "name": "Hexabloom",
+  "short_name": "Hexabloom",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#fbfff8",
+  "theme_color": "#fbfff8",
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+name = "hexabloom-game"
+main = "src/index.js"
+compatibility_date = "2026-04-01"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = [ "GameRoom" ]
+
+[vars]
+ALLOWED_ORIGINS = "http://localhost:8031,http://127.0.0.1:8031,http://192.168.1.148:8031,https://emh.github.io,https://emh.io"
