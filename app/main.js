@@ -338,10 +338,21 @@ function leaderboardPlayers() {
 function renderTray() {
   const player = currentPlayer();
   const hiddenIds = activeTileIds();
+  const panel = $("tray-panel");
   const tray = $("tile-tray");
+  const finished = Boolean(player?.isFinished);
+
+  panel.hidden = finished;
 
   if (!player) {
     $("rack-label").textContent = "rack";
+    $("pending-label").textContent = "";
+    tray.innerHTML = "";
+    return;
+  }
+
+  if (finished) {
+    $("rack-label").textContent = "";
     $("pending-label").textContent = "";
     tray.innerHTML = "";
     return;
