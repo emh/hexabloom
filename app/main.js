@@ -25,6 +25,7 @@ const CURRENT_PLAYER_COLOR = "#0072b2";
 const OTHER_PLAYER_COLOR = "#d55e00";
 
 const appState = loadAppState();
+applyLinkedSessionFromUrl(appState);
 const ui = {
   screen: appState.session?.playerName ? null : "setup",
   leaderboardOpen: false,
@@ -90,6 +91,24 @@ function toast(message) {
   toastTimer = setTimeout(() => el.classList.remove("visible"), 2200);
 }
 
+async function copyText(value) {
+  if (globalThis.navigator?.clipboard?.writeText) {
+    await globalThis.navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.append(input);
+  input.select();
+  const copied = document.execCommand("copy");
+  input.remove();
+  if (!copied) throw new Error("Copy failed");
+}
+
 function renderAll() {
   const showSetup = Boolean(ui.screen);
   $("setup-screen").classList.toggle("active", showSetup);
@@ -114,19 +133,63 @@ function renderAll() {
 
 function renderSetup() {
   const name = appState.session?.playerName || "";
-  const canCancel = Boolean(currentPlayer());
+  const hasSession = Boolean(appState.session?.playerId);
+  const accountLink = hasSession ? getAccountLink(name) : "";
 
   $("setup-content").innerHTML = `
     <h1>hexabloom</h1>
-    <p>choose your name</p>
+    <p>${hasSession ? "your name" : "choose your name"}</p>
     <label class="field-label" for="setup-name">Your name</label>
     <input type="text" class="field-input setup-input" id="setup-name" value="${esc(name)}" placeholder="Name" autocomplete="off" spellcheck="false">
+    ${hasSession ? `
+      <label class="field-label" for="account-link">Account link</label>
+      <div class="copy-field">
+        <input type="text" class="field-input copy-input" id="account-link" value="${esc(accountLink)}" readonly>
+        <button class="action-link" type="button" data-action="copy-account-link">Copy</button>
+      </div>
+    ` : ""}
     <div class="detail-actions setup-actions">
-      <button class="action-link primary" type="button" data-action="join-board">Join</button>
-      ${canCancel ? '<button class="action-link muted" type="button" data-action="close-setup">Cancel</button>' : ""}
+      <button class="action-link primary" type="button" data-action="join-board">${hasSession ? "OK" : "Join"}</button>
+      ${hasSession ? '<button class="action-link muted" type="button" data-action="close-setup">Cancel</button>' : ""}
     </div>
   `;
   setTimeout(() => $("setup-name")?.focus(), 0);
+}
+
+function getAccountLink(name = appState.session?.playerName || "") {
+  const playerId = appState.session?.playerId || "";
+  const playerName = normalizePlayerName(name) || appState.session?.playerName || "";
+  const url = new URL(globalThis.location?.href || "http://localhost:8031/");
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("player", playerId);
+  url.searchParams.set("name", playerName);
+  return url.toString();
+}
+
+function applyLinkedSessionFromUrl(state) {
+  if (!globalThis.location?.search) return;
+
+  const params = new URLSearchParams(globalThis.location.search);
+  const playerId = normalizeLinkedPlayerId(params.get("player") || params.get("playerId"));
+  const playerName = normalizePlayerName(params.get("name") || params.get("playerName"));
+  if (!playerId || !playerName) return;
+
+  const changedAccount = state.session?.playerId !== playerId;
+  state.session = { roomId: GLOBAL_ROOM_ID, playerId, playerName };
+  if (changedAccount) state.pendingMoves = [];
+  saveAppState(state);
+
+  params.delete("player");
+  params.delete("playerId");
+  params.delete("name");
+  params.delete("playerName");
+  const cleaned = `${globalThis.location.pathname}${params.toString() ? `?${params}` : ""}${globalThis.location.hash}`;
+  globalThis.history?.replaceState?.({}, "", cleaned);
+}
+
+function normalizeLinkedPlayerId(value) {
+  return String(value || "").trim().slice(0, 128);
 }
 
 function renderHud() {
@@ -153,7 +216,6 @@ function renderHud() {
   $("stats-row").innerHTML = `
     <span>${player ? `score ${player.score}` : "score 0"}</span>
     <span>${leader ? `leader ${esc(leader.name)} ${leader.score}` : "leader -"}</span>
-    <span>${status}</span>
   `;
 }
 
@@ -314,7 +376,7 @@ async function enterRoom(nameInput) {
     save();
     startSync();
     renderAll();
-    toast("joined board");
+    toast(payload.created ? "joined board" : "saved");
   } catch (error) {
     const base = createGameState(game.id === roomId ? game : { id: roomId });
     const joined = joinGame(base, { playerId, name: playerName });
@@ -325,7 +387,7 @@ async function enterRoom(nameInput) {
     ui.screen = null;
     save();
     renderAll();
-    toast(`local board: ${error.message}`);
+    toast(joined.created ? `local board: ${error.message}` : "saved");
   }
 }
 
@@ -778,7 +840,7 @@ function drawTileCell(cell, options = {}) {
   ctx.fillText(cell.letter, point.x, point.y - 1);
   ctx.fillStyle = "rgba(17, 17, 17, 0.62)";
   ctx.font = "10px 'SF Mono', Menlo, monospace";
-  ctx.fillText(String(cell.value), point.x + 14, point.y + 15);
+  ctx.fillText(String(cell.value), point.x, point.y + 18);
   ctx.restore();
 }
 
@@ -942,8 +1004,18 @@ function wireEvents() {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (!action) return;
 
+    if (action === "copy-account-link") {
+      const link = getAccountLink($("setup-name")?.value || appState.session?.playerName || "");
+      const input = $("account-link");
+      if (input) input.value = link;
+      copyText(link)
+        .then(() => toast("copied"))
+        .catch(() => toast("copy failed"));
+      return;
+    }
+
     if (action === "close-setup") {
-      if (!currentPlayer()) return;
+      if (!appState.session) return;
       ui.screen = null;
       startSync();
       renderAll();
@@ -956,9 +1028,15 @@ function wireEvents() {
   });
 
   $("setup-screen").addEventListener("keydown", event => {
-    if (event.key === "Enter" && event.target.matches("input")) {
+    if (event.key === "Enter" && event.target.id === "setup-name") {
       enterRoom($("setup-name").value);
     }
+  });
+
+  $("setup-screen").addEventListener("input", event => {
+    if (event.target.id !== "setup-name") return;
+    const accountLink = $("account-link");
+    if (accountLink) accountLink.value = getAccountLink(event.target.value);
   });
 
   $("room-line").addEventListener("click", event => {
