@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   GameRuleError,
+  LETTER_DISTRIBUTION,
   applyMove,
   createGameState,
   createMove,
@@ -34,6 +35,8 @@ function forceRack(game, playerId, letters) {
   }));
   player.remainingBag = [];
 }
+
+const TILES_PER_BAG = Object.values(LETTER_DISTRIBUTION).reduce((sum, count) => sum + count, 0);
 
 test("placementAxis accepts contiguous placements on one of the three hex axes", () => {
   assert.equal(placementAxis([{ q: 0, r: 0 }, { q: 1, r: 0 }, { q: 2, r: 0 }]).index, 0);
@@ -148,6 +151,19 @@ test("createPlayer deals eleven rack tiles and a remaining bag", () => {
   const player = createPlayer({ id: "p1", name: "Ada" });
   assert.equal(player.rack.length, 11);
   assert.ok(player.remainingBag.length > 80);
+});
+
+test("game length controls how many tile bags each player receives", () => {
+  let game = createGameState({ id: "LONG01", tileBagCount: 3 });
+  game = joinGame(game, { playerId: "p1", name: "Ada" }).state;
+
+  assert.equal(game.gameLength, "medium");
+  assert.equal(game.players.p1.rack.length, 11);
+  assert.equal(game.players.p1.remainingBag.length, TILES_PER_BAG * 3 - 11);
+
+  const reset = resetGameState(game, { seed: "medium-reset" });
+  assert.equal(reset.tileBagCount, 3);
+  assert.equal(reset.players.p1.remainingBag.length, TILES_PER_BAG * 3 - 11);
 });
 
 test("createPlayer returns overflow rack tiles to the bag", () => {

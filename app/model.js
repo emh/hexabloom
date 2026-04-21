@@ -2,6 +2,13 @@ export const EDGE_BUFFER = 6;
 export const INITIAL_RADIUS = 5;
 export const RACK_SIZE = 11;
 export const GLOBAL_ROOM_ID = "BOARD";
+export const DEFAULT_GAME_LENGTH = "short";
+
+export const GAME_LENGTHS = Object.freeze({
+  short: Object.freeze({ key: "short", label: "Short", tileBagCount: 1 }),
+  medium: Object.freeze({ key: "medium", label: "Medium", tileBagCount: 3 }),
+  long: Object.freeze({ key: "long", label: "Long", tileBagCount: 5 })
+});
 
 export const DIRECTIONS = [
   { q: 1, r: 0 },
@@ -115,6 +122,23 @@ export function normalizePlayerName(value) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 40);
 }
 
+export function normalizeGameLength(value) {
+  const key = String(value || "").trim().toLowerCase();
+  if (GAME_LENGTHS[key]) return key;
+  return DEFAULT_GAME_LENGTH;
+}
+
+export function normalizeTileBagCount(value) {
+  const count = Math.max(1, Number.parseInt(value, 10) || 1);
+  const match = Object.values(GAME_LENGTHS).find(length => length.tileBagCount === count);
+  return match ? match.tileBagCount : GAME_LENGTHS[DEFAULT_GAME_LENGTH].tileBagCount;
+}
+
+export function gameLengthFromTileBagCount(value) {
+  const count = normalizeTileBagCount(value);
+  return Object.values(GAME_LENGTHS).find(length => length.tileBagCount === count)?.key || DEFAULT_GAME_LENGTH;
+}
+
 export function hexKey(q, r) {
   return `${q},${r}`;
 }
@@ -159,18 +183,21 @@ export function isWithinBounds(hex, bounds) {
   );
 }
 
-export function createTileBag(seed = createId()) {
+export function createTileBag(seed = createId(), tileBagCount = 1) {
   const tiles = [];
   let index = 0;
+  const bagCount = normalizeTileBagCount(tileBagCount);
 
-  for (const [letter, count] of Object.entries(LETTER_DISTRIBUTION)) {
-    for (let copy = 0; copy < count; copy += 1) {
-      tiles.push({
-        id: `${seed}-${index.toString(36)}`,
-        letter,
-        value: LETTER_VALUES[letter] || 1
-      });
-      index += 1;
+  for (let bag = 0; bag < bagCount; bag += 1) {
+    for (const [letter, count] of Object.entries(LETTER_DISTRIBUTION)) {
+      for (let copy = 0; copy < count; copy += 1) {
+        tiles.push({
+          id: `${seed}-${index.toString(36)}`,
+          letter,
+          value: LETTER_VALUES[letter] || 1
+        });
+        index += 1;
+      }
     }
   }
 
@@ -188,7 +215,9 @@ export function createPlayer(input = {}) {
     remainingBag = Array.isArray(input.remainingBag) ? normalizeTiles(input.remainingBag) : [];
     ({ rack, remainingBag } = returnOverflowRackTiles(rack, remainingBag, `${id}:${name}`));
   } else {
-    const bag = Array.isArray(input.remainingBag) ? normalizeTiles(input.remainingBag) : createTileBag(input.seed || `${id}:${name}`);
+    const bag = Array.isArray(input.remainingBag)
+      ? normalizeTiles(input.remainingBag)
+      : createTileBag(input.seed || `${id}:${name}`, input.tileBagCount || input.bagCount);
     rack = bag.splice(0, RACK_SIZE);
     remainingBag = bag;
   }
@@ -210,6 +239,9 @@ export function createPlayer(input = {}) {
 export function createGameState(input = {}) {
   const board = normalizeBoard(input.board);
   const players = {};
+  const tileBagCount = normalizeTileBagCount(
+    input.tileBagCount ?? input.bagCount ?? GAME_LENGTHS[normalizeGameLength(input.gameLength)].tileBagCount
+  );
 
   if (input.players && typeof input.players === "object") {
     for (const player of Object.values(input.players)) {
@@ -220,6 +252,8 @@ export function createGameState(input = {}) {
 
   return {
     id: normalizeRoomId(input.id),
+    tileBagCount,
+    gameLength: gameLengthFromTileBagCount(tileBagCount),
     board,
     players,
     moves: Array.isArray(input.moves) ? input.moves.map(normalizeMoveRecord).filter(Boolean) : [],
@@ -235,7 +269,7 @@ export function resetGameState(inputState, options = {}) {
   const players = {};
 
   for (const player of Object.values(state.players)) {
-    const bag = createTileBag(`${seed}:${player.id}:${player.name}`);
+    const bag = createTileBag(`${seed}:${player.id}:${player.name}`, state.tileBagCount);
     const rack = bag.splice(0, RACK_SIZE);
     const resetPlayer = createPlayer({
       id: player.id,
@@ -250,6 +284,7 @@ export function resetGameState(inputState, options = {}) {
 
   return createGameState({
     id: state.id,
+    tileBagCount: state.tileBagCount,
     players,
     createdAt: state.createdAt,
     updatedAt: new Date().toISOString()
@@ -269,7 +304,7 @@ export function joinGame(inputState, input = {}) {
     return { state, player: existing, created: false };
   }
 
-  const player = createPlayer({ id, name });
+  const player = createPlayer({ id, name, tileBagCount: state.tileBagCount });
   state.players[player.id] = player;
   state.updatedAt = new Date().toISOString();
   return { state, player, created: true };

@@ -1,12 +1,12 @@
-import { GLOBAL_ROOM_ID, createGameState } from "./model.js";
+import { GLOBAL_ROOM_ID, createGameState, normalizeRoomId } from "./model.js";
 import { loadSettings } from "./storage.js";
 
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 15000;
 
 export class GameSync {
-  constructor({ playerId, onState, onStatus, onError }) {
-    this.roomId = GLOBAL_ROOM_ID;
+  constructor({ roomId = GLOBAL_ROOM_ID, playerId, onState, onStatus, onError }) {
+    this.roomId = normalizeRoomId(roomId) || GLOBAL_ROOM_ID;
     this.playerId = playerId;
     this.onState = onState;
     this.onStatus = onStatus;
@@ -87,7 +87,7 @@ export class GameSync {
 
   async fetchState() {
     this.setStatus("syncing");
-    const response = await fetch(getGameEndpoint(this.settings.apiBaseUrl, "/state"));
+    const response = await fetch(getGameEndpoint(this.settings.apiBaseUrl, this.roomId, "/state"));
     if (!response.ok) throw await responseError(response);
     const payload = await response.json();
     this.handleStatePayload(payload);
@@ -97,7 +97,7 @@ export class GameSync {
 
   async submitMove(move) {
     this.setStatus("syncing");
-    const response = await fetch(getGameEndpoint(this.settings.apiBaseUrl, "/move"), {
+    const response = await fetch(getGameEndpoint(this.settings.apiBaseUrl, this.roomId, "/move"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ move })
@@ -112,7 +112,7 @@ export class GameSync {
 
   async resetBoard() {
     this.setStatus("syncing");
-    const response = await fetch(getGameEndpoint(this.settings.apiBaseUrl, "/reset"), {
+    const response = await fetch(getGameEndpoint(this.settings.apiBaseUrl, this.roomId, "/reset"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ playerId: this.playerId })
@@ -127,7 +127,7 @@ export class GameSync {
 
   async reorderRack(tileIds) {
     this.setStatus("syncing");
-    const response = await fetch(getGameEndpoint(this.settings.apiBaseUrl, "/rack"), {
+    const response = await fetch(getGameEndpoint(this.settings.apiBaseUrl, this.roomId, "/rack"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ playerId: this.playerId, tileIds })
@@ -188,11 +188,11 @@ export class GameSync {
   }
 }
 
-export async function joinRemoteGame({ playerId, name }, settings = loadSettings()) {
-  const response = await fetch(getGameEndpoint(settings.apiBaseUrl, "/join"), {
+export async function joinRemoteGame({ roomId = GLOBAL_ROOM_ID, playerId, name, tileBagCount }, settings = loadSettings()) {
+  const response = await fetch(getGameEndpoint(settings.apiBaseUrl, roomId, "/join"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ playerId, name })
+    body: JSON.stringify({ playerId, name, tileBagCount })
   });
 
   if (!response.ok) throw await responseError(response);
@@ -203,17 +203,33 @@ export async function joinRemoteGame({ playerId, name }, settings = loadSettings
   };
 }
 
+export async function remoteGameExists(roomId, settings = loadSettings()) {
+  if (!settings.apiBaseUrl) return false;
+  const response = await fetch(getGameEndpoint(settings.apiBaseUrl, roomId, "/exists"));
+  if (!response.ok) throw await responseError(response);
+  const payload = await response.json();
+  return Boolean(payload.exists);
+}
+
 function getEndpoint(apiBaseUrl, path) {
   const base = apiBaseUrl.replace(/\/+$/, "");
   return new URL(path, `${base}/`).toString();
 }
 
-function getGameEndpoint(apiBaseUrl, path) {
-  return getEndpoint(apiBaseUrl, `/game${path}`);
+function getGameEndpoint(apiBaseUrl, roomId, path) {
+  const normalized = normalizeRoomId(roomId) || GLOBAL_ROOM_ID;
+  const prefix = normalized === GLOBAL_ROOM_ID
+    ? "/game"
+    : `/game/${encodeURIComponent(normalized)}`;
+  return getEndpoint(apiBaseUrl, `${prefix}${path}`);
 }
 
-function getWebSocketUrl(apiBaseUrl) {
-  const url = new URL("/game/stream", `${apiBaseUrl.replace(/\/+$/, "")}/`);
+function getWebSocketUrl(apiBaseUrl, roomId) {
+  const normalized = normalizeRoomId(roomId) || GLOBAL_ROOM_ID;
+  const path = normalized === GLOBAL_ROOM_ID
+    ? "/game/stream"
+    : `/game/${encodeURIComponent(normalized)}/stream`;
+  const url = new URL(path, `${apiBaseUrl.replace(/\/+$/, "")}/`);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }

@@ -1,7 +1,7 @@
-import { GLOBAL_ROOM_ID, createDeviceId, createGameState } from "./model.js";
+import { GLOBAL_ROOM_ID, createDeviceId, createGameState, normalizeRoomId } from "./model.js";
 
 export const STATE_STORAGE_KEY = "hexabloom_v1";
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 
 export function loadAppState() {
   try {
@@ -20,9 +20,12 @@ export function saveAppState(state) {
       schemaVersion: SCHEMA_VERSION,
       deviceId: state.deviceId,
       session: state.session || null,
-      game: state.game || null,
-      pendingMoves: Array.isArray(state.pendingMoves) ? state.pendingMoves : [],
-      camera: state.camera || null
+      activeGameId: normalizeRoomId(state.activeGameId),
+      linkedGameId: normalizeRoomId(state.linkedGameId),
+      games: normalizeGames(state.games),
+      pendingMovesByGame: normalizePendingMovesByGame(state.pendingMovesByGame),
+      camerasByGame: normalizeCamerasByGame(state.camerasByGame),
+      lastSeenByGame: normalizeLastSeenByGame(state.lastSeenByGame)
     }));
   } catch {
     // Local storage can fail in private windows or quota pressure.
@@ -34,20 +37,50 @@ export function createInitialState() {
     schemaVersion: SCHEMA_VERSION,
     deviceId: createDeviceId(),
     session: null,
-    game: null,
-    pendingMoves: [],
-    camera: null
+    activeGameId: null,
+    linkedGameId: null,
+    games: {},
+    pendingMovesByGame: {},
+    camerasByGame: {},
+    lastSeenByGame: {}
   };
 }
 
 export function normalizeStoredState(input = {}) {
+  const games = normalizeGames(input.games);
+  const legacyGame = input.game ? createGameState(input.game) : null;
+  if (legacyGame?.id && !games[legacyGame.id]) games[legacyGame.id] = legacyGame;
+
+  const activeGameId = normalizeRoomId(input.activeGameId)
+    || normalizeRoomId(input.session?.roomId)
+    || legacyGame?.id
+    || null;
+  const linkedGameId = normalizeRoomId(input.linkedGameId);
+  const pendingMovesByGame = normalizePendingMovesByGame(input.pendingMovesByGame);
+  if (Array.isArray(input.pendingMoves) && activeGameId && !pendingMovesByGame[activeGameId]) {
+    pendingMovesByGame[activeGameId] = input.pendingMoves.filter(isQueuedMove);
+  }
+
+  const camerasByGame = normalizeCamerasByGame(input.camerasByGame);
+  const legacyCamera = normalizeCamera(input.camera);
+  if (legacyCamera && activeGameId && !camerasByGame[activeGameId]) {
+    camerasByGame[activeGameId] = legacyCamera;
+  }
+  const lastSeenByGame = normalizeLastSeenByGame(input.lastSeenByGame);
+  for (const [id, game] of Object.entries(games)) {
+    if (!lastSeenByGame[id]) lastSeenByGame[id] = game.updatedAt;
+  }
+
   return {
     schemaVersion: SCHEMA_VERSION,
     deviceId: typeof input.deviceId === "string" && input.deviceId ? input.deviceId : createDeviceId(),
     session: normalizeSession(input.session),
-    game: input.game ? createGameState(input.game) : null,
-    pendingMoves: Array.isArray(input.pendingMoves) ? input.pendingMoves.filter(isQueuedMove) : [],
-    camera: normalizeCamera(input.camera)
+    activeGameId,
+    linkedGameId,
+    games,
+    pendingMovesByGame,
+    camerasByGame,
+    lastSeenByGame
   };
 }
 
@@ -62,7 +95,60 @@ function normalizeSession(input = {}) {
   const playerId = typeof input.playerId === "string" ? input.playerId : "";
   const playerName = typeof input.playerName === "string" ? input.playerName : "";
   if (!playerId) return null;
-  return { roomId: GLOBAL_ROOM_ID, playerId, playerName };
+  return { roomId: normalizeRoomId(input.roomId) || GLOBAL_ROOM_ID, playerId, playerName };
+}
+
+function normalizeGames(input = {}) {
+  const games = {};
+  if (!input || typeof input !== "object") return games;
+
+  for (const [key, value] of Object.entries(input)) {
+    const id = normalizeRoomId(value?.id || key);
+    if (!id) continue;
+    const source = value && typeof value === "object" ? value : {};
+    games[id] = createGameState({ ...source, id });
+  }
+
+  return games;
+}
+
+function normalizePendingMovesByGame(input = {}) {
+  const movesByGame = {};
+  if (!input || typeof input !== "object") return movesByGame;
+
+  for (const [key, moves] of Object.entries(input)) {
+    const id = normalizeRoomId(key);
+    if (!id || !Array.isArray(moves)) continue;
+    movesByGame[id] = moves.filter(isQueuedMove);
+  }
+
+  return movesByGame;
+}
+
+function normalizeCamerasByGame(input = {}) {
+  const cameras = {};
+  if (!input || typeof input !== "object") return cameras;
+
+  for (const [key, camera] of Object.entries(input)) {
+    const id = normalizeRoomId(key);
+    const normalized = normalizeCamera(camera);
+    if (id && normalized) cameras[id] = normalized;
+  }
+
+  return cameras;
+}
+
+function normalizeLastSeenByGame(input = {}) {
+  const lastSeen = {};
+  if (!input || typeof input !== "object") return lastSeen;
+
+  for (const [key, value] of Object.entries(input)) {
+    const id = normalizeRoomId(key);
+    if (!id || typeof value !== "string" || Number.isNaN(Date.parse(value))) continue;
+    lastSeen[id] = value;
+  }
+
+  return lastSeen;
 }
 
 function normalizeCamera(input = {}) {

@@ -10,11 +10,13 @@ export class GameRoom {
     this.state = state;
     this.env = env;
     this.game = null;
+    this.hasStoredGame = false;
     this.ready = this.initialize();
   }
 
   async initialize() {
     const storedGame = await this.state.storage.get("game") || {};
+    this.hasStoredGame = Boolean(storedGame?.id);
     this.game = createGameState(storedGame);
     if (hasOversizedRacks(storedGame)) await this.save();
   }
@@ -56,6 +58,10 @@ export class GameRoom {
         return json({ state: this.game }, 200, cors);
       }
 
+      if (route.action === "exists" && request.method === "GET") {
+        return json({ exists: this.gameExists(route.roomId) }, 200, cors);
+      }
+
       if (route.action === "stream" && request.method === "GET") {
         this.ensureRoom(route.roomId);
         return this.stream(request);
@@ -68,8 +74,8 @@ export class GameRoom {
   }
 
   async join(request, roomId, cors) {
-    this.ensureRoom(roomId);
     const body = await readJson(request);
+    this.ensureRoom(roomId, body);
     const joined = joinGame(this.game, {
       playerId: body.playerId,
       name: body.name
@@ -183,13 +189,25 @@ export class GameRoom {
 
   async save() {
     await this.state.storage.put("game", this.game);
+    this.hasStoredGame = Boolean(this.game?.id);
   }
 
-  ensureRoom(roomId) {
+  gameExists(roomId) {
+    const normalized = normalizeRoomId(roomId);
+    return Boolean(this.hasStoredGame && normalized && this.game?.id === normalized);
+  }
+
+  ensureRoom(roomId, options = {}) {
     const normalized = normalizeRoomId(roomId);
     if (!normalized) throw statusError("Board is required", 400);
     if (this.game.id && this.game.id !== normalized) throw statusError("Board mismatch", 409);
-    if (!this.game.id) this.game = createGameState({ ...this.game, id: normalized });
+    if (!this.game.id) {
+      this.game = createGameState({
+        ...this.game,
+        id: normalized,
+        tileBagCount: options.tileBagCount || this.game.tileBagCount
+      });
+    }
   }
 
   broadcast(sender, message) {
@@ -226,7 +244,7 @@ export default {
 };
 
 export function parseGameRoute(pathname) {
-  const globalMatch = /^\/game\/(join|move|rack|reset|state|stream)\/?$/.exec(pathname);
+  const globalMatch = /^\/game\/(exists|join|move|rack|reset|state|stream)\/?$/.exec(pathname);
   if (globalMatch) {
     return {
       roomId: GLOBAL_ROOM_ID,
@@ -234,7 +252,7 @@ export function parseGameRoute(pathname) {
     };
   }
 
-  const match = /^\/game\/([A-Za-z0-9]+)\/(join|move|rack|reset|state|stream)\/?$/.exec(pathname);
+  const match = /^\/game\/([A-Za-z0-9]+)\/(exists|join|move|rack|reset|state|stream)\/?$/.exec(pathname);
   if (!match) return null;
   return {
     roomId: normalizeRoomId(match[1]),

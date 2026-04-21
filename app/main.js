@@ -1,4 +1,6 @@
 import {
+  DEFAULT_GAME_LENGTH,
+  GAME_LENGTHS,
   GLOBAL_ROOM_ID,
   GameRuleError,
   applyMove,
@@ -9,13 +11,15 @@ import {
   hexKey,
   isWithinBounds,
   joinGame,
+  normalizeRoomId,
   normalizePlayerName,
   orderedPlayers,
+  randomRoomId,
   resetGameState,
   validateMove
 } from "./model.js";
 import { loadAppState, saveAppState } from "./storage.js";
-import { GameSync, joinRemoteGame } from "./sync.js";
+import { GameSync, joinRemoteGame, remoteGameExists } from "./sync.js";
 
 const HEX_SIZE = 34;
 const MIN_SCALE = 0.35;
@@ -25,9 +29,16 @@ const CURRENT_PLAYER_COLOR = "#0072b2";
 const OTHER_PLAYER_COLOR = "#d55e00";
 
 const appState = loadAppState();
-applyLinkedSessionFromUrl(appState);
+applyLinkedParamsFromUrl(appState);
 const ui = {
-  screen: appState.session?.playerName ? null : "setup",
+  screen: appState.session?.playerName ? "home" : "setup",
+  nameReturnScreen: "home",
+  shareGameId: null,
+  newGameLength: DEFAULT_GAME_LENGTH,
+  joinOpen: false,
+  joinCode: "",
+  joinError: "",
+  joinChecking: false,
   leaderboardOpen: false,
   historyOpen: false,
   syncStatus: "idle",
@@ -43,39 +54,71 @@ const ui = {
   drawQueued: false,
   resizeQueued: false,
   canvasSize: { width: 0, height: 0 },
-  camera: appState.camera || { x: 0, y: 0, scale: 1 }
+  camera: { x: 0, y: 0, scale: 1 }
 };
 
-if (appState.game?.id && appState.game.id !== GLOBAL_ROOM_ID) {
-  appState.game = null;
-  appState.pendingMoves = [];
+let game = appState.activeGameId && appState.games[appState.activeGameId]
+  ? createGameState(appState.games[appState.activeGameId])
+  : null;
+if (game?.id && appState.camerasByGame[game.id]) {
+  ui.camera = appState.camerasByGame[game.id];
 }
-
-let game = createGameState(appState.game || { id: GLOBAL_ROOM_ID });
 let sync = null;
 let toastTimer = null;
+const homeSyncs = new Map();
+const homeSyncChecks = new Set();
 
 const $ = id => document.getElementById(id);
 const canvas = $("board-canvas");
 const ctx = canvas.getContext("2d");
 
 function save() {
-  appState.game = game;
-  appState.camera = ui.camera;
+  if (game?.id) {
+    appState.games[game.id] = createGameState(game);
+    appState.camerasByGame[game.id] = ui.camera;
+  }
   saveAppState(appState);
 }
 
 function currentPlayer() {
+  if (!game) return null;
   const id = appState.session?.playerId;
   return id ? game.players[id] || null : null;
 }
 
 function activeTileIds() {
   const ids = new Set(ui.staged.map(placement => placement.tileId));
-  for (const move of appState.pendingMoves) {
+  for (const move of currentPendingMoves()) {
     for (const placement of move.placements || []) ids.add(placement.tileId);
   }
   return ids;
+}
+
+function currentPendingMoves() {
+  const roomId = normalizeRoomId(game?.id || appState.activeGameId);
+  if (!roomId) return [];
+  if (!appState.pendingMovesByGame[roomId]) appState.pendingMovesByGame[roomId] = [];
+  return appState.pendingMovesByGame[roomId];
+}
+
+function storeGame(state) {
+  const normalized = createGameState(state);
+  if (!normalized.id) return normalized;
+  appState.games[normalized.id] = normalized;
+  return normalized;
+}
+
+function markGameSeen(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  if (!roomId) return;
+  const state = appState.games?.[roomId] || (game?.id === roomId ? game : null);
+  appState.lastSeenByGame[roomId] = state?.updatedAt || new Date().toISOString();
+}
+
+function hasUnreadUpdates(state) {
+  const seenAt = Date.parse(appState.lastSeenByGame?.[state.id] || "");
+  const updatedAt = Date.parse(state.updatedAt || "");
+  return Number.isFinite(seenAt) && Number.isFinite(updatedAt) && updatedAt > seenAt;
 }
 
 function esc(value) {
@@ -110,12 +153,48 @@ async function copyText(value) {
   if (!copied) throw new Error("Copy failed");
 }
 
+async function shareGameLink(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  if (!roomId) return;
+
+  const link = getGameLink(roomId);
+  ui.shareGameId = roomId;
+
+  if (globalThis.navigator?.share) {
+    try {
+      await globalThis.navigator.share({
+        title: "Hexabloom",
+        text: "Join my Hexabloom game.",
+        url: link
+      });
+      toast("shared");
+      renderAll();
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+    }
+  }
+
+  copyText(link)
+    .then(() => {
+      toast("copied");
+      renderAll();
+    })
+    .catch(() => toast("copy failed"));
+}
+
 function renderAll() {
-  const showSetup = Boolean(ui.screen);
+  const showSetup = ui.screen === "setup" || ui.screen === "new-game";
+  const showHome = ui.screen === "home";
+  const showGame = ui.screen === null && appState.session && game;
+  const showHomeUnderSetup = showSetup && appState.session && ui.nameReturnScreen !== "game";
+  if (showHome) startHomeStreams();
+  else stopHomeStreams();
   $("setup-screen").classList.toggle("active", showSetup);
-  $("leaderboard-screen").classList.toggle("active", ui.leaderboardOpen && !showSetup);
-  $("history-screen").classList.toggle("active", ui.historyOpen && !showSetup);
-  $("app").hidden = showSetup || !appState.session;
+  $("home-screen").classList.toggle("active", showHome || showHomeUnderSetup);
+  $("leaderboard-screen").classList.toggle("active", ui.leaderboardOpen && showGame);
+  $("history-screen").classList.toggle("active", ui.historyOpen && showGame);
+  $("app").hidden = !showGame;
 
   if (showSetup) {
     ui.leaderboardOpen = false;
@@ -123,7 +202,24 @@ function renderAll() {
     $("leaderboard-screen").classList.remove("active");
     $("history-screen").classList.remove("active");
     document.body.classList.add("no-scroll");
-    renderSetup();
+    if (ui.screen === "new-game") renderNewGame();
+    else renderSetup();
+    return;
+  }
+
+  if (showHome) {
+    ui.leaderboardOpen = false;
+    ui.historyOpen = false;
+    $("leaderboard-screen").classList.remove("active");
+    $("history-screen").classList.remove("active");
+    document.body.classList.add("no-scroll");
+    renderHome();
+    return;
+  }
+
+  if (!showGame) {
+    ui.screen = appState.session ? "home" : "setup";
+    renderAll();
     return;
   }
 
@@ -134,6 +230,62 @@ function renderAll() {
   renderLeaderboard();
   renderHistory();
   queueResizeCanvas();
+}
+
+function startHomeStreams() {
+  const ids = Object.keys(appState.games || {}).map(normalizeRoomId).filter(Boolean);
+  const idSet = new Set(ids);
+
+  for (const [roomId, stream] of homeSyncs.entries()) {
+    if (idSet.has(roomId)) continue;
+    stream.stop();
+    homeSyncs.delete(roomId);
+  }
+
+  for (const roomId of ids) {
+    ensureHomeStream(roomId);
+  }
+}
+
+function stopHomeStreams() {
+  for (const stream of homeSyncs.values()) {
+    stream.stop();
+  }
+  homeSyncs.clear();
+}
+
+async function ensureHomeStream(roomId) {
+  if (homeSyncs.has(roomId) || homeSyncChecks.has(roomId)) return;
+  homeSyncChecks.add(roomId);
+
+  try {
+    if (!await remoteGameExists(roomId)) return;
+  } catch {
+    return;
+  } finally {
+    homeSyncChecks.delete(roomId);
+  }
+
+  if (ui.screen !== "home" || homeSyncs.has(roomId)) return;
+
+  const stream = new GameSync({
+    roomId,
+    playerId: appState.session?.playerId || appState.deviceId,
+    onState: state => {
+      const remote = createGameState(state);
+      const previous = appState.games[remote.id];
+      const changed = !previous || previous.updatedAt !== remote.updatedAt;
+      storeGame(remote);
+      if (!changed || ui.screen !== "home") return;
+      saveAppState(appState);
+      renderAll();
+    },
+    onStatus: () => {},
+    onError: () => {}
+  });
+
+  homeSyncs.set(roomId, stream);
+  stream.start();
 }
 
 function renderSetup() {
@@ -161,6 +313,125 @@ function renderSetup() {
   setTimeout(() => $("setup-name")?.focus(), 0);
 }
 
+function renderHome() {
+  const games = Object.values(appState.games || {})
+    .map(value => createGameState(value))
+    .filter(value => value.id)
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const currentGames = games.filter(value => !isGameComplete(value));
+  const completedGames = games.filter(isGameComplete);
+  const name = appState.session?.playerName || "player";
+
+  $("home-content").innerHTML = `
+    <div class="home-header">
+      <div>
+        <h1>hexabloom</h1>
+        <button class="inline-link home-name" type="button" data-action="edit-name">${esc(name)}</button>
+      </div>
+    </div>
+    <div class="home-list-actions">
+      <button class="action-link primary home-new-game" type="button" data-action="new-game">New game</button>
+      <button class="action-link primary" type="button" data-action="toggle-join">Join</button>
+    </div>
+    ${ui.joinOpen ? renderJoinForm() : ""}
+    ${renderGameSection("current games", currentGames, "No current games.")}
+    ${completedGames.length ? renderGameSection("completed games", completedGames, "No completed games.") : ""}
+  `;
+
+  if (ui.joinOpen) setTimeout(() => $("join-code-input")?.focus(), 0);
+}
+
+function renderNewGame() {
+  const selected = GAME_LENGTHS[ui.newGameLength] ? ui.newGameLength : DEFAULT_GAME_LENGTH;
+  const options = Object.values(GAME_LENGTHS).map(length => `
+    <button class="length-option ${selected === length.key ? "selected" : ""}" type="button" data-action="choose-length" data-length="${length.key}" aria-pressed="${selected === length.key}">
+      <strong>${esc(length.label)}</strong>
+      <span>${length.tileBagCount} ${length.tileBagCount === 1 ? "bag" : "bags"}</span>
+    </button>
+  `).join("");
+
+  $("setup-content").innerHTML = `
+    <h1>new game</h1>
+    <p>choose a length</p>
+    <div class="length-options" role="group" aria-label="Game length">
+      ${options}
+    </div>
+    <div class="detail-actions setup-actions">
+      <button class="action-link primary" type="button" data-action="create-game">Create</button>
+      <button class="action-link muted" type="button" data-action="cancel-new-game">Cancel</button>
+    </div>
+  `;
+}
+
+function renderGameSection(title, games, emptyText) {
+  const rows = games.length
+    ? games.map(renderGameRow).join("")
+    : `<p class="game-list-empty">${esc(emptyText)}</p>`;
+
+  return `
+    <section class="game-section">
+      <div class="game-section-header">
+        <h2>${esc(title)}</h2>
+        <span>${games.length}</span>
+      </div>
+      <div class="game-list">
+        ${rows}
+      </div>
+    </section>
+  `;
+}
+
+function renderJoinForm() {
+  return `
+    <form class="join-game-form" data-action="join-code">
+      <label class="field-label" for="join-code-input">Invite code</label>
+      <div class="join-field">
+        <input type="text" class="field-input join-code-input" id="join-code-input" value="${esc(ui.joinCode)}" placeholder="Code" autocomplete="off" spellcheck="false">
+        <button class="action-link primary" type="submit" ${ui.joinChecking ? "disabled" : ""}>Join</button>
+      </div>
+      ${ui.joinError ? `<p class="join-error">${esc(ui.joinError)}</p>` : ""}
+    </form>
+  `;
+}
+
+function renderGameRow(state) {
+  const pending = appState.pendingMovesByGame?.[state.id]?.length || 0;
+  const moves = state.moves?.length || 0;
+  const length = GAME_LENGTHS[state.gameLength] || GAME_LENGTHS[DEFAULT_GAME_LENGTH];
+  const stats = [
+    `${moves} ${moves === 1 ? "move" : "moves"}`,
+    `${length.label.toLowerCase()}`
+  ];
+  if (pending) stats.push(`${pending} pending`);
+
+  const shareLink = getGameLink(state.id);
+  const unread = hasUnreadUpdates(state);
+
+  return `
+    <article class="game-card ${ui.shareGameId === state.id ? "recently-shared" : ""} ${unread ? "has-updates" : ""}">
+      <button class="game-row" type="button" data-action="open-game" data-game-id="${esc(state.id)}">
+        <span class="game-row-main">
+          <span class="game-title-line">
+            ${unread ? '<span class="game-update-dot" aria-label="New updates"></span>' : ""}
+            <strong>${esc(formatPlayers(state))}</strong>
+          </span>
+          <span>${esc(stats.join(" / "))}</span>
+        </span>
+        <span class="game-row-meta">
+          <span>started ${esc(formatStarted(state.createdAt))}</span>
+        </span>
+      </button>
+      <div class="game-share-row">
+        <input type="text" class="game-share-link" value="${esc(shareLink)}" readonly aria-label="Share link for ${esc(state.id)}">
+        <div class="game-share-actions">
+          <button class="action-link" type="button" data-action="share-game-link" data-game-id="${esc(state.id)}">Share</button>
+          <button class="action-link" type="button" data-action="copy-game-link" data-game-id="${esc(state.id)}">Copy</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
 function getAccountLink(name = appState.session?.playerName || "") {
   const playerId = appState.session?.playerId || "";
   const playerName = normalizePlayerName(name) || appState.session?.playerName || "";
@@ -172,23 +443,70 @@ function getAccountLink(name = appState.session?.playerName || "") {
   return url.toString();
 }
 
-function applyLinkedSessionFromUrl(state) {
+function getGameLink(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  const url = new URL(globalThis.location?.href || "http://localhost:8031/");
+  url.search = "";
+  url.hash = "";
+  if (roomId) url.searchParams.set("game", roomId);
+  return url.toString();
+}
+
+function formatPlayers(state) {
+  const players = orderedPlayers(state.players);
+  if (!players.length) return "No players yet";
+  const names = players.slice(0, 3).map(player => player.name);
+  const overflow = players.length - names.length;
+  return overflow > 0 ? `${names.join(", ")} +${overflow}` : names.join(", ");
+}
+
+function formatStarted(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function isGameComplete(state) {
+  const players = Object.values(state.players || {});
+  return players.length > 0 && players.every(player => player.isFinished);
+}
+
+function applyLinkedParamsFromUrl(state) {
   if (!globalThis.location?.search) return;
 
   const params = new URLSearchParams(globalThis.location.search);
   const playerId = normalizeLinkedPlayerId(params.get("player") || params.get("playerId"));
   const playerName = normalizePlayerName(params.get("name") || params.get("playerName"));
-  if (!playerId || !playerName) return;
+  const gameId = normalizeRoomId(params.get("game") || params.get("room") || params.get("roomId"));
 
-  const changedAccount = state.session?.playerId !== playerId;
-  state.session = { roomId: GLOBAL_ROOM_ID, playerId, playerName };
-  if (changedAccount) state.pendingMoves = [];
+  if (playerId && playerName) {
+    const changedAccount = state.session?.playerId !== playerId;
+    state.session = { roomId: gameId || state.activeGameId || GLOBAL_ROOM_ID, playerId, playerName };
+    if (changedAccount) state.pendingMovesByGame = {};
+  }
+
+  if (gameId) {
+    state.linkedGameId = gameId;
+    state.activeGameId = gameId;
+    if (!state.games[gameId]) state.games[gameId] = createGameState({ id: gameId });
+  }
+
+  if (!playerId && !playerName && !gameId) return;
+
   saveAppState(state);
-
   params.delete("player");
   params.delete("playerId");
   params.delete("name");
   params.delete("playerName");
+  params.delete("game");
+  params.delete("room");
+  params.delete("roomId");
   const cleaned = `${globalThis.location.pathname}${params.toString() ? `?${params}` : ""}${globalThis.location.hash}`;
   globalThis.history?.replaceState?.({}, "", cleaned);
 }
@@ -378,7 +696,8 @@ function renderTray() {
   }
 
   $("rack-label").textContent = `${player.remainingBag.length} letters left`;
-  $("pending-label").textContent = appState.pendingMoves.length ? `${appState.pendingMoves.length} pending` : "";
+  const pendingMoves = currentPendingMoves();
+  $("pending-label").textContent = pendingMoves.length ? `${pendingMoves.length} pending` : "";
 
   tray.innerHTML = items.map(item => item.type === "placeholder"
     ? '<div class="rack-tile rack-placeholder" aria-hidden="true"></div>'
@@ -440,8 +759,7 @@ function getPreview() {
   }
 }
 
-async function enterRoom(nameInput) {
-  const roomId = GLOBAL_ROOM_ID;
+async function savePlayerName(nameInput) {
   const playerName = normalizePlayerName(nameInput);
   if (!playerName) {
     ui.screen = "setup";
@@ -451,48 +769,213 @@ async function enterRoom(nameInput) {
   }
 
   const playerId = appState.session?.playerId || createId();
+  appState.session = {
+    roomId: normalizeRoomId(appState.activeGameId || appState.linkedGameId) || GLOBAL_ROOM_ID,
+    playerId,
+    playerName
+  };
+  saveAppState(appState);
+
+  const linkedGameId = normalizeRoomId(appState.linkedGameId);
+  if (linkedGameId) {
+    await openGame(linkedGameId);
+    return;
+  }
+
+  if (ui.nameReturnScreen === "game" && game?.id) {
+    await openGame(game.id, { silent: true });
+    return;
+  }
+
+  if (!Object.keys(appState.games || {}).length) {
+    ui.nameReturnScreen = "home";
+    ui.newGameLength = DEFAULT_GAME_LENGTH;
+    ui.screen = "new-game";
+    renderAll();
+    return;
+  }
+
+  ui.nameReturnScreen = "home";
+  ui.screen = "home";
+  renderAll();
+}
+
+async function createNewGame() {
+  if (!appState.session?.playerId) {
+    ui.nameReturnScreen = "home";
+    ui.screen = "setup";
+    renderAll();
+    return;
+  }
+
+  const length = GAME_LENGTHS[ui.newGameLength] || GAME_LENGTHS[DEFAULT_GAME_LENGTH];
+  const roomId = randomRoomId();
+  const playerId = appState.session.playerId;
+  const playerName = appState.session.playerName;
   ui.syncStatus = "syncing";
   renderAll();
 
   try {
-    const payload = await joinRemoteGame({ roomId, playerId, name: playerName });
-    game = createGameState(payload.state);
-    appState.session = { roomId, playerId, playerName };
+    const payload = await joinRemoteGame({ roomId, playerId, name: playerName, tileBagCount: length.tileBagCount });
+    game = storeGame(payload.state);
+    appState.activeGameId = game.id;
+    appState.session = { ...appState.session, roomId: game.id };
+    appState.linkedGameId = null;
     ui.localOnly = false;
-    ui.screen = null;
-    save();
-    startSync();
-    renderAll();
-    toast(payload.created ? "joined board" : "saved");
+    toast("game created");
   } catch (error) {
-    const base = createGameState(game.id === roomId ? game : { id: roomId });
+    const base = createGameState({ id: roomId, tileBagCount: length.tileBagCount });
     const joined = joinGame(base, { playerId, name: playerName });
-    game = joined.state;
-    appState.session = { roomId, playerId, playerName };
+    game = storeGame(joined.state);
+    appState.activeGameId = game.id;
+    appState.session = { ...appState.session, roomId: game.id };
+    appState.linkedGameId = null;
     ui.localOnly = true;
     ui.syncStatus = "local";
-    ui.screen = null;
-    save();
+    toast(`local game: ${error.message}`);
+  }
+
+  ui.camera = { x: 0, y: 0, scale: 1 };
+  appState.camerasByGame[game.id] = ui.camera;
+  markGameSeen(game.id);
+  ui.shareGameId = game.id;
+  ui.screen = "home";
+  saveAppState(appState);
+  renderAll();
+}
+
+async function joinGameByCode(codeInput = ui.joinCode) {
+  const roomId = normalizeRoomId(codeInput);
+  ui.joinCode = roomId;
+  ui.joinError = "";
+
+  if (!roomId) {
+    ui.joinError = "enter an invite code";
     renderAll();
-    toast(joined.created ? `local board: ${error.message}` : "saved");
+    return;
+  }
+
+  ui.joinChecking = true;
+  renderAll();
+
+  try {
+    const exists = Boolean(appState.games?.[roomId]) || await remoteGameExists(roomId);
+    if (!exists) {
+      ui.joinChecking = false;
+      ui.joinError = "game not found";
+      renderAll();
+      return;
+    }
+
+    ui.joinChecking = false;
+    ui.joinOpen = false;
+    ui.joinCode = "";
+    ui.joinError = "";
+    await openGame(roomId);
+  } catch (error) {
+    ui.joinChecking = false;
+    ui.joinError = error?.status === 404 ? "game not found" : "could not check game";
+    renderAll();
   }
 }
 
+async function openGame(gameId, options = {}) {
+  const roomId = normalizeRoomId(gameId);
+  if (!roomId) return;
+
+  if (!appState.session?.playerId) {
+    appState.linkedGameId = roomId;
+    saveAppState(appState);
+    ui.nameReturnScreen = "home";
+    ui.screen = "setup";
+    renderAll();
+    return;
+  }
+
+  sync?.stop();
+  sync = null;
+  appState.activeGameId = roomId;
+  appState.session = { ...appState.session, roomId };
+  game = storeGame(createGameState({
+    ...(appState.games[roomId] || {}),
+    id: roomId,
+    tileBagCount: options.tileBagCount || appState.games[roomId]?.tileBagCount
+  }));
+  markGameSeen(roomId);
+  ui.camera = appState.camerasByGame[roomId] || { x: 0, y: 0, scale: 1 };
+  ui.localOnly = false;
+  ui.syncStatus = "syncing";
+  ui.screen = null;
+  ui.leaderboardOpen = false;
+  ui.historyOpen = false;
+  ui.staged = [];
+  renderAll();
+
+  try {
+    const payload = await joinRemoteGame({
+      roomId,
+      playerId: appState.session.playerId,
+      name: appState.session.playerName,
+      tileBagCount: options.tileBagCount || game.tileBagCount
+    });
+    game = storeGame(payload.state);
+    appState.activeGameId = game.id;
+    appState.session = { ...appState.session, roomId: game.id };
+    appState.linkedGameId = null;
+    ui.localOnly = false;
+    markGameSeen(game.id);
+    save();
+    startSync();
+    renderAll();
+    if (!options.silent) toast(payload.created ? "joined game" : "opened game");
+  } catch (error) {
+    const base = createGameState(appState.games[roomId] || game || { id: roomId });
+    const joined = joinGame(base, {
+      playerId: appState.session.playerId,
+      name: appState.session.playerName
+    });
+    game = storeGame(joined.state);
+    appState.activeGameId = game.id;
+    appState.session = { ...appState.session, roomId: game.id };
+    appState.linkedGameId = null;
+    ui.localOnly = true;
+    ui.syncStatus = "local";
+    markGameSeen(game.id);
+    save();
+    renderAll();
+    if (!options.silent) toast(joined.created ? `local game: ${error.message}` : "local game");
+  }
+}
+
+function goHome() {
+  sync?.stop();
+  sync = null;
+  ui.screen = "home";
+  ui.leaderboardOpen = false;
+  ui.historyOpen = false;
+  ui.staged = [];
+  stopDragging();
+  save();
+  renderAll();
+}
+
 function startSync() {
-  if (!appState.session || ui.localOnly) return;
+  if (!appState.session || ui.localOnly || !game?.id) return;
   sync?.stop();
   sync = new GameSync({
-    roomId: appState.session.roomId,
+    roomId: game.id,
     playerId: appState.session.playerId,
     onState: state => {
-      game = createGameState(state);
+      game = storeGame(state);
+      appState.activeGameId = game.id;
+      markGameSeen(game.id);
       pruneStagedTiles();
       save();
       renderAll();
       flushPending();
     },
     onStatus: status => {
-      ui.syncStatus = appState.pendingMoves.length && status === "synced" ? "pending" : status;
+      ui.syncStatus = currentPendingMoves().length && status === "synced" ? "pending" : status;
       renderHud();
       renderPreview();
     },
@@ -508,21 +991,25 @@ function startSync() {
 }
 
 async function flushPending() {
-  if (ui.localOnly || ui.flushing || !sync || !appState.pendingMoves.length) return;
+  const pendingMoves = currentPendingMoves();
+  if (ui.localOnly || ui.flushing || !sync || !pendingMoves.length) return;
   ui.flushing = true;
   renderPreview();
 
-  while (appState.pendingMoves.length) {
-    const move = appState.pendingMoves[0];
+  while (pendingMoves.length) {
+    const move = pendingMoves[0];
     try {
       const payload = await sync.submitMove(move);
-      if (payload.state) game = createGameState(payload.state);
-      appState.pendingMoves.shift();
+      if (payload.state) {
+        game = storeGame(payload.state);
+        markGameSeen(game.id);
+      }
+      pendingMoves.shift();
       save();
       renderAll();
     } catch (error) {
       if (error.status >= 400 && error.status < 500) {
-        appState.pendingMoves.shift();
+        pendingMoves.shift();
         save();
         toast(error.message || "Move rejected");
         renderAll();
@@ -541,13 +1028,15 @@ async function flushPending() {
 async function hardResetBoard() {
   if (ui.resetting) return;
   ui.resetting = true;
-  appState.pendingMoves = [];
+  currentPendingMoves().length = 0;
   ui.staged = [];
   stopDragging();
   renderAll();
 
   if (ui.localOnly || !sync) {
     game = resetGameState(game);
+    storeGame(game);
+    markGameSeen(game.id);
     save();
     ui.resetting = false;
     renderAll();
@@ -557,7 +1046,10 @@ async function hardResetBoard() {
 
   try {
     const payload = await sync.resetBoard();
-    if (payload.state) game = createGameState(payload.state);
+    if (payload.state) {
+      game = storeGame(payload.state);
+      markGameSeen(game.id);
+    }
     save();
     toast("board reset");
   } catch (error) {
@@ -594,7 +1086,8 @@ function commitStaged() {
   if (ui.localOnly) {
     try {
       const result = applyMove(game, move);
-      game = result.state;
+      game = storeGame(result.state);
+      markGameSeen(game.id);
       ui.staged = [];
       save();
       renderAll();
@@ -605,7 +1098,7 @@ function commitStaged() {
     return;
   }
 
-  appState.pendingMoves.push(move);
+  currentPendingMoves().push(move);
   ui.staged = [];
   save();
   renderAll();
@@ -838,7 +1331,7 @@ function resizeCanvas() {
   canvas.height = Math.max(1, Math.floor(rect.height * dpr));
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  if (!appState.camera || wasZeroSized) {
+  if (!game?.id || !appState.camerasByGame[game.id] || wasZeroSized) {
     ui.camera.x = rect.width / 2;
     ui.camera.y = rect.height / 2;
     ui.camera.scale = Math.min(1.05, Math.max(0.72, rect.width / 460));
@@ -1107,20 +1600,38 @@ function wireEvents() {
 
     if (action === "close-setup") {
       if (!appState.session) return;
-      ui.screen = null;
-      startSync();
+      ui.screen = ui.nameReturnScreen === "game" && game ? null : "home";
+      if (ui.screen === null) startSync();
       renderAll();
       return;
     }
 
     if (action === "join-board") {
-      enterRoom($("setup-name").value);
+      savePlayerName($("setup-name").value);
+      return;
+    }
+
+    if (action === "choose-length") {
+      const length = event.target.closest("[data-length]")?.dataset.length;
+      if (GAME_LENGTHS[length]) ui.newGameLength = length;
+      renderAll();
+      return;
+    }
+
+    if (action === "create-game") {
+      createNewGame();
+      return;
+    }
+
+    if (action === "cancel-new-game") {
+      ui.screen = "home";
+      renderAll();
     }
   });
 
   $("setup-screen").addEventListener("keydown", event => {
     if (event.key === "Enter" && event.target.id === "setup-name") {
-      enterRoom($("setup-name").value);
+      savePlayerName($("setup-name").value);
     }
   });
 
@@ -1128,6 +1639,69 @@ function wireEvents() {
     if (event.target.id !== "setup-name") return;
     const accountLink = $("account-link");
     if (accountLink) accountLink.value = getAccountLink(event.target.value);
+  });
+
+  $("home-screen").addEventListener("click", event => {
+    const target = event.target.closest("[data-action]");
+    const action = target?.dataset.action;
+    if (!action) return;
+
+    if (action === "new-game") {
+      ui.newGameLength = DEFAULT_GAME_LENGTH;
+      ui.joinOpen = false;
+      ui.joinError = "";
+      ui.screen = "new-game";
+      renderAll();
+      return;
+    }
+
+    if (action === "toggle-join") {
+      ui.joinOpen = !ui.joinOpen;
+      ui.joinError = "";
+      renderAll();
+      return;
+    }
+
+    if (action === "edit-name") {
+      ui.nameReturnScreen = "home";
+      ui.screen = "setup";
+      renderAll();
+      return;
+    }
+
+    if (action === "copy-game-link") {
+      const link = getGameLink(target.dataset.gameId);
+      ui.shareGameId = normalizeRoomId(target.dataset.gameId);
+      copyText(link)
+        .then(() => {
+          toast("copied");
+          renderAll();
+        })
+        .catch(() => toast("copy failed"));
+      return;
+    }
+
+    if (action === "share-game-link") {
+      shareGameLink(target.dataset.gameId);
+      return;
+    }
+
+    if (action === "open-game") {
+      openGame(target.dataset.gameId);
+    }
+  });
+
+  $("home-screen").addEventListener("submit", event => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action !== "join-code") return;
+    event.preventDefault();
+    joinGameByCode($("join-code-input")?.value || "");
+  });
+
+  $("home-screen").addEventListener("input", event => {
+    if (event.target.id !== "join-code-input") return;
+    ui.joinCode = event.target.value;
+    ui.joinError = "";
   });
 
   $("room-line").addEventListener("click", event => {
@@ -1163,12 +1737,14 @@ function wireEvents() {
 
   $("switch-session-btn").addEventListener("click", () => {
     sync?.stop();
+    ui.nameReturnScreen = "game";
     ui.screen = "setup";
     ui.leaderboardOpen = false;
     ui.historyOpen = false;
     renderAll();
   });
 
+  $("back-home-btn").addEventListener("click", goHome);
   $("commit-btn").addEventListener("click", commitStaged);
   $("reset-btn").addEventListener("click", resetStaged);
   $("shuffle-btn").addEventListener("click", shuffleRack);
@@ -1284,6 +1860,6 @@ function isHardResetHotkey(event) {
 
 wireEvents();
 renderAll();
-if (appState.session?.playerName) {
-  enterRoom(appState.session.playerName);
+if (appState.session?.playerName && appState.linkedGameId) {
+  openGame(appState.linkedGameId);
 }
