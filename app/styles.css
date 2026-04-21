@@ -274,6 +274,14 @@ body.no-scroll {
   color: var(--green);
 }
 
+.preview-strip.notice {
+  color: var(--blue);
+}
+
+.preview-strip.complete {
+  color: var(--green);
+}
+
 .preview-strip.invalid {
   color: var(--red);
 }

@@ -304,6 +304,8 @@ export function joinGame(inputState, input = {}) {
     return { state, player: existing, created: false };
   }
 
+  if (isGameComplete(state)) throw new GameRuleError("Game is complete");
+
   const player = createPlayer({ id, name, tileBagCount: state.tileBagCount });
   state.players[player.id] = player;
   state.updatedAt = new Date().toISOString();
@@ -554,6 +556,16 @@ export function orderedPlayers(players) {
     if (right.score !== left.score) return right.score - left.score;
     return left.name.localeCompare(right.name);
   });
+}
+
+export function playerTilesLeft(player = {}) {
+  return (Array.isArray(player.rack) ? player.rack.length : 0) +
+    (Array.isArray(player.remainingBag) ? player.remainingBag.length : 0);
+}
+
+export function isGameComplete(state = {}) {
+  const players = Object.values(state.players || {});
+  return players.length > 0 && players.every(player => player.isFinished || playerTilesLeft(player) === 0);
 }
 
 export function boardWithPlacements(board, placements, player, tilesById, move) {

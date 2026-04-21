@@ -9,11 +9,13 @@ import {
   createId,
   createMove,
   hexKey,
+  isGameComplete,
   isWithinBounds,
   joinGame,
   normalizeRoomId,
   normalizePlayerName,
   orderedPlayers,
+  playerTilesLeft,
   randomRoomId,
   resetGameState,
   validateMove
@@ -43,6 +45,7 @@ const ui = {
   historyOpen: false,
   syncStatus: "idle",
   localOnly: false,
+  notice: null,
   staged: [],
   hoverHex: null,
   dragging: null,
@@ -128,10 +131,25 @@ function esc(value) {
 }
 
 function toast(message) {
+  clearTimeout(toastTimer);
+
+  if (ui.screen === null && game) {
+    ui.notice = { message: String(message || ""), detail: "" };
+    renderPreview();
+    toastTimer = setTimeout(() => {
+      ui.notice = null;
+      renderPreview();
+    }, 2200);
+    return;
+  }
+
+  showMiniToast(message);
+}
+
+function showMiniToast(message) {
   const el = $("toast");
   el.textContent = message;
   el.classList.add("visible");
-  clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove("visible"), 2200);
 }
 
@@ -472,11 +490,6 @@ function formatStarted(value) {
   }).format(date);
 }
 
-function isGameComplete(state) {
-  const players = Object.values(state.players || {});
-  return players.length > 0 && players.every(player => player.isFinished);
-}
-
 function applyLinkedParamsFromUrl(state) {
   if (!globalThis.location?.search) return;
 
@@ -521,9 +534,14 @@ function renderHud() {
   const leader = players[0];
   const occupied = Object.keys(game.board).length;
   const playerLabel = `${players.length} ${players.length === 1 ? "player" : "players"}`;
+  const complete = isGameComplete(game);
+  const tileCounts = players.map(entry => `
+    <span>${esc(entry.name)} ${playerTilesLeft(entry)} left</span>
+  `).join("");
 
   $("room-line").innerHTML = `
     <span>${occupied} tiles</span>
+    ${complete ? "<span>·</span><span>complete</span>" : ""}
     <span>·</span>
     <button class="inline-link" type="button" data-action="open-leaderboard">${esc(playerLabel)}</button>
     <span>·</span>
@@ -541,6 +559,7 @@ function renderHud() {
   $("stats-row").innerHTML = `
     <span>${player ? `score ${player.score}` : "score 0"}</span>
     <span>${leader ? `leader ${esc(leader.name)} ${leader.score}` : "leader -"}</span>
+    ${tileCounts}
   `;
 }
 
@@ -724,13 +743,19 @@ function rackPlaceholderIndexForTile(player, hiddenIds, tileId) {
 
 function renderPreview() {
   const preview = getPreview();
+  const notice = ui.notice && !ui.staged.length ? ui.notice : null;
+  const complete = game && isGameComplete(game) && !ui.staged.length && !notice;
   const strip = $("preview-strip");
-  strip.hidden = !preview.message;
-  strip.classList.toggle("valid", preview.valid);
+  const message = notice?.message || (complete ? "Game complete" : preview.message);
+  const detail = notice?.detail || (complete ? "All joined players used every tile" : preview.detail);
+  strip.hidden = !message;
+  strip.classList.toggle("valid", Boolean(preview.message && preview.valid));
   strip.classList.toggle("invalid", Boolean(preview.message && !preview.valid));
+  strip.classList.toggle("notice", Boolean(notice));
+  strip.classList.toggle("complete", Boolean(complete));
   strip.innerHTML = `
-    <span>${esc(preview.message)}</span>
-    <span>${preview.detail ? esc(preview.detail) : ""}</span>
+    <span>${esc(message)}</span>
+    <span>${detail ? esc(detail) : ""}</span>
   `;
   $("commit-btn").disabled = !preview.valid || ui.flushing;
 }

@@ -8,8 +8,10 @@ import {
   createMove,
   createPlayer,
   hexKey,
+  isGameComplete,
   joinGame,
   placementAxis,
+  playerTilesLeft,
   resetGameState,
   validateMove
 } from "../app/model.js";
@@ -164,6 +166,23 @@ test("game length controls how many tile bags each player receives", () => {
   const reset = resetGameState(game, { seed: "medium-reset" });
   assert.equal(reset.tileBagCount, 3);
   assert.equal(reset.players.p1.remainingBag.length, TILES_PER_BAG * 3 - 11);
+});
+
+test("game is complete when every joined player has used all tiles", () => {
+  const game = gameWithPlayers();
+  game.players.p1.rack = [];
+  game.players.p1.remainingBag = [];
+  game.players.p1.isFinished = true;
+  game.players.p2.rack = [];
+  game.players.p2.remainingBag = [];
+  game.players.p2.isFinished = true;
+
+  assert.equal(playerTilesLeft(game.players.p1), 0);
+  assert.equal(isGameComplete(game), true);
+  assert.throws(() => joinGame(game, { playerId: "p3", name: "Cid" }), /Game is complete/);
+
+  const rejoined = joinGame(game, { playerId: "p1", name: "Ada" });
+  assert.equal(rejoined.created, false);
 });
 
 test("createPlayer returns overflow rack tiles to the bag", () => {
