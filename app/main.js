@@ -33,6 +33,10 @@ const THEME_COLORS = {
   light: "#fbfff8",
   dark: "#10130f"
 };
+const THEME_STATUS_BARS = {
+  light: "default",
+  dark: "black-translucent"
+};
 const APP_UPDATE_RELOAD_STORAGE_KEY = "hexabloom_app_update_reload_at";
 const APP_UPDATE_RELOAD_MIN_MS = 60000;
 const SYSTEM_THEME_QUERY = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
@@ -166,7 +170,9 @@ function syncViewportTheme(theme) {
     document.body.style.backgroundColor = color;
     document.body.style.setProperty("--viewport-bg", color);
   }
+  document.querySelector('meta[name="color-scheme"]')?.setAttribute("content", theme);
   document.querySelector('meta[name="theme-color"]')?.setAttribute("content", color);
+  document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute("content", THEME_STATUS_BARS[theme] || THEME_STATUS_BARS.light);
 }
 
 function toggleTheme() {
@@ -195,6 +201,14 @@ function updateThemeToggles(theme = currentTheme()) {
     button.setAttribute("aria-pressed", String(theme === "dark"));
     button.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
   }
+}
+
+function enableScreenTransitionsAfterFirstPaint() {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      document.documentElement.classList.add("motion-ready");
+    });
+  });
 }
 
 function save() {
@@ -3068,6 +3082,7 @@ initTheme();
 if (deriveFriendsFromLocalGames()) saveAppState(appState);
 wireEvents();
 renderAll();
+enableScreenTransitionsAfterFirstPaint();
 registerServiceWorker();
 if (appState.session?.playerName && appState.linkedGameId) {
   openGame(appState.linkedGameId);

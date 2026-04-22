@@ -774,6 +774,23 @@ body.no-scroll {
   transition: transform 0.35s var(--ease), visibility 0s linear 0s;
 }
 
+#app,
+#app.active,
+.overlay,
+.overlay.active {
+  transition: none;
+}
+
+:root.motion-ready #app,
+:root.motion-ready .overlay {
+  transition: transform 0.35s var(--ease), visibility 0s linear 0.35s;
+}
+
+:root.motion-ready #app.active,
+:root.motion-ready .overlay.active {
+  transition: transform 0.35s var(--ease), visibility 0s linear 0s;
+}
+
 .invite-overlay,
 .leaderboard-overlay,
 .history-overlay {
