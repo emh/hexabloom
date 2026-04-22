@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#fbfff8">
+  <meta name="color-scheme" content="light dark">
   <meta name="application-name" content="Hexabloom">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -17,6 +18,23 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&display=swap" rel="stylesheet">
+  <script>
+    (() => {
+      const themeColors = { light: "#fbfff8", dark: "#10130f" };
+      let stored = "";
+      try {
+        stored = localStorage.getItem("hexabloom_theme") || "";
+      } catch {
+        stored = "";
+      }
+      const theme = stored === "light" || stored === "dark"
+        ? stored
+        : (globalThis.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light");
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", themeColors[theme]);
+    })();
+  </script>
   <link rel="stylesheet" href="./styles.css">
   <script src="./version.js"></script>
   <script src="./config.js"></script>
@@ -56,6 +74,10 @@
           <div class="header-right">
             <button class="header-user" type="button" id="switch-session-btn"></button>
             <span class="sync-dot" id="sync-dot" aria-label="not synced" title="not synced"></span>
+            <button class="theme-toggle" type="button" data-action="toggle-theme" aria-label="Switch to dark mode" aria-pressed="false" data-theme="light">
+              <span class="theme-toggle-side theme-toggle-light" aria-hidden="true"></span>
+              <span class="theme-toggle-side theme-toggle-dark" aria-hidden="true"></span>
+            </button>
           </div>
         </header>
         <div class="stats-row" id="stats-row"></div>

@@ -28,8 +28,12 @@ const HEX_SIZE = 34;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 2.4;
 const SQRT3 = Math.sqrt(3);
-const CURRENT_PLAYER_COLOR = "#0072b2";
-const OTHER_PLAYER_COLOR = "#d55e00";
+const THEME_STORAGE_KEY = "hexabloom_theme";
+const THEME_COLORS = {
+  light: "#fbfff8",
+  dark: "#10130f"
+};
+const SYSTEM_THEME_QUERY = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
 const appState = loadAppState();
 applyLinkedParamsFromUrl(appState);
@@ -105,6 +109,80 @@ const APP_UPDATE_FILES = [
   "./sw.js"
 ];
 const APP_UPDATE_CHECK_MS = 30000;
+
+function initTheme() {
+  applyTheme(resolveTheme());
+  const onSystemThemeChange = () => {
+    if (!storedThemePreference()) applyTheme(resolveTheme());
+  };
+  if (SYSTEM_THEME_QUERY?.addEventListener) {
+    SYSTEM_THEME_QUERY.addEventListener("change", onSystemThemeChange);
+  } else {
+    SYSTEM_THEME_QUERY?.addListener?.(onSystemThemeChange);
+  }
+}
+
+function normalizeTheme(value) {
+  return value === "dark" || value === "light" ? value : "";
+}
+
+function storedThemePreference() {
+  try {
+    return normalizeTheme(localStorage.getItem(THEME_STORAGE_KEY));
+  } catch {
+    return "";
+  }
+}
+
+function systemThemePreference() {
+  return SYSTEM_THEME_QUERY?.matches ? "dark" : "light";
+}
+
+function resolveTheme() {
+  return storedThemePreference() || systemThemePreference();
+}
+
+function currentTheme() {
+  return normalizeTheme(document.documentElement.dataset.theme) || resolveTheme();
+}
+
+function applyTheme(theme) {
+  const nextTheme = normalizeTheme(theme) || "light";
+  document.documentElement.dataset.theme = nextTheme;
+  document.documentElement.style.colorScheme = nextTheme;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", THEME_COLORS[nextTheme]);
+  updateThemeToggles(nextTheme);
+  if (game && ui.leaderboardOpen) renderLeaderboard();
+  if (ui.canvasSize.width && ui.canvasSize.height) scheduleDraw();
+}
+
+function toggleTheme() {
+  const nextTheme = currentTheme() === "dark" ? "light" : "dark";
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+  } catch {
+    // Theme still applies for this session if local storage is unavailable.
+  }
+  applyTheme(nextTheme);
+}
+
+function themeToggleMarkup() {
+  const theme = currentTheme();
+  return `
+    <button class="theme-toggle" type="button" data-action="toggle-theme" aria-label="${theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}" aria-pressed="${theme === "dark"}" data-theme="${theme}">
+      <span class="theme-toggle-side theme-toggle-light" aria-hidden="true"></span>
+      <span class="theme-toggle-side theme-toggle-dark" aria-hidden="true"></span>
+    </button>
+  `;
+}
+
+function updateThemeToggles(theme = currentTheme()) {
+  for (const button of document.querySelectorAll(".theme-toggle")) {
+    button.dataset.theme = theme;
+    button.setAttribute("aria-pressed", String(theme === "dark"));
+    button.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+  }
+}
 
 function save() {
   if (game?.id) {
@@ -513,6 +591,7 @@ function renderHome() {
         <h1>hexabloom</h1>
         <button class="inline-link home-name" type="button" data-action="edit-name">${esc(name)}</button>
       </div>
+      ${themeToggleMarkup()}
     </div>
     <div class="home-list-actions">
       <button class="action-link primary home-new-game" type="button" data-action="new-game">New game</button>
@@ -853,11 +932,13 @@ function renderHud() {
 
 function renderLeaderboard() {
   const players = leaderboardPlayers();
+  const colors = getCanvasTheme();
   const rows = players.length ? players.map((player, index) => `
     <div class="leaderboard-row">
       <span>${index + 1}</span>
       <strong class="leaderboard-player-name">
-        <span>${esc(player.name)}</span>
+        <span class="player-color-hex" style="--player-color: ${playerColor(player.id, colors)}" aria-hidden="true"></span>
+        <span class="player-name">${esc(player.name)}</span>
         ${player.isOwner ? '<small>owner</small>' : ""}
       </strong>
       <span>${player.turnCount}</span>
@@ -2127,8 +2208,9 @@ function resizeCanvas() {
 
 function drawBoard() {
   const { width, height } = ui.canvasSize;
+  const colors = getCanvasTheme();
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#fbfff8";
+  ctx.fillStyle = colors.boardBg;
   ctx.fillRect(0, 0, width, height);
 
   const preview = getPreview();
@@ -2139,13 +2221,13 @@ function drawBoard() {
   ctx.translate(ui.camera.x, ui.camera.y);
   ctx.scale(ui.camera.scale, ui.camera.scale);
 
-  drawGrid(previewKeys);
-  drawCells(draftBoard, previewKeys);
+  drawGrid(previewKeys, colors);
+  drawCells(draftBoard, previewKeys, colors);
 
   if (ui.hoverHex && (!ui.dragging || ui.dragging.valid)) {
     drawHex(ui.hoverHex, {
-      fill: "rgba(139, 0, 0, 0.08)",
-      stroke: "#8b0000",
+      fill: colors.hoverFill,
+      stroke: colors.red,
       lineWidth: 1.4
     });
   }
@@ -2153,7 +2235,7 @@ function drawBoard() {
   ctx.restore();
 }
 
-function drawGrid(previewKeys) {
+function drawGrid(previewKeys, colors) {
   const bounds = game.bounds;
   for (let q = bounds.minQ; q <= bounds.maxQ; q += 1) {
     for (let r = bounds.minR; r <= bounds.maxR; r += 1) {
@@ -2166,31 +2248,32 @@ function drawGrid(previewKeys) {
       }
       const key = hexKey(q, r);
       drawHex(hex, {
-        fill: previewKeys.has(key) ? "rgba(35, 122, 59, 0.08)" : "rgba(255, 255, 255, 0.5)",
-        stroke: previewKeys.has(key) ? "rgba(35, 122, 59, 0.42)" : "rgba(17, 17, 17, 0.18)",
+        fill: previewKeys.has(key) ? colors.previewFill : colors.gridFill,
+        stroke: previewKeys.has(key) ? colors.previewStroke : colors.gridStroke,
         lineWidth: 1
       });
     }
   }
 }
 
-function drawCells(board, previewKeys) {
+function drawCells(board, previewKeys, colors) {
   const cells = Object.values(board).sort((left, right) => left.timestamp - right.timestamp);
   for (const cell of cells) {
     const staged = ui.staged.some(placement => placement.tileId === cell.tileId);
-    drawTileCell(cell, { staged, highlighted: previewKeys.has(hexKey(cell.q, cell.r)) });
+    drawTileCell(cell, { staged, highlighted: previewKeys.has(hexKey(cell.q, cell.r)) }, colors);
   }
 }
 
-function drawTileCell(cell, options = {}) {
-  const color = tileOwnerColor(cell.playerId);
-  const fill = options.staged ? "#fffffc" : colorToRgba(color, options.highlighted ? 0.18 : 0.11);
+function drawTileCell(cell, options = {}, colors = getCanvasTheme()) {
+  const color = tileOwnerColor(cell.playerId, colors);
+  const fillAlpha = options.highlighted ? colors.tileHighlightAlpha : colors.tileFillAlpha;
+  const fill = options.staged ? colors.tileFace : colorToRgba(color, fillAlpha);
   const stroke = color;
   const point = hexToPixel(cell);
 
   ctx.save();
   if (options.staged) {
-    ctx.shadowColor = "rgba(17, 17, 17, 0.16)";
+    ctx.shadowColor = colors.tileCanvasShadow;
     ctx.shadowBlur = 12;
     ctx.shadowOffsetY = 4;
   }
@@ -2202,12 +2285,12 @@ function drawTileCell(cell, options = {}) {
   ctx.lineWidth = options.staged ? 2 : 1.4;
   ctx.stroke();
 
-  ctx.fillStyle = "#111";
+  ctx.fillStyle = colors.tileText;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.font = "600 28px 'Crimson Pro', Georgia, serif";
   ctx.fillText(cell.letter, point.x, point.y - 1);
-  ctx.fillStyle = "rgba(17, 17, 17, 0.62)";
+  ctx.fillStyle = colors.tileSubtext;
   ctx.font = "10px 'SF Mono', Menlo, monospace";
   ctx.fillText(String(cell.value), point.x, point.y + 18);
   ctx.restore();
@@ -2243,8 +2326,85 @@ function boardWithStaged() {
   return boardWithPlacements(game.board, ui.staged, player, tilesById, move);
 }
 
-function tileOwnerColor(playerId) {
-  return playerId && playerId === appState.session?.playerId ? CURRENT_PLAYER_COLOR : OTHER_PLAYER_COLOR;
+function tileOwnerColor(playerId, colors = getCanvasTheme()) {
+  return playerColor(playerId, colors);
+}
+
+function playerColor(playerId, colors = getCanvasTheme()) {
+  if (playerId && playerId === appState.session?.playerId) return colors.currentPlayer;
+  return otherPlayerColor(playerId, colors);
+}
+
+function otherPlayerColor(playerId, colors) {
+  const palette = colors.otherPlayers?.length ? colors.otherPlayers : [colors.otherPlayer];
+  if (!palette.length) return colors.otherPlayer;
+
+  const ids = Object.keys(game?.players || {})
+    .filter(id => id && id !== appState.session?.playerId)
+    .sort((left, right) => left.localeCompare(right));
+  const taken = new Set();
+
+  for (const id of ids) {
+    const start = hashToPaletteIndex(`${game?.id || "hexabloom"}:${id}`, palette.length);
+    let colorIndex = start;
+    for (let offset = 0; offset < palette.length; offset += 1) {
+      const candidate = (start + offset) % palette.length;
+      if (!taken.has(candidate)) {
+        colorIndex = candidate;
+        break;
+      }
+    }
+    taken.add(colorIndex);
+    if (id === playerId) return palette[colorIndex];
+  }
+
+  return palette[hashToPaletteIndex(String(playerId || ""), palette.length)];
+}
+
+function hashToPaletteIndex(value, length) {
+  if (!length) return 0;
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % length;
+}
+
+function getCanvasTheme() {
+  return {
+    boardBg: cssColor("--board-bg", "#fbfff8"),
+    gridFill: cssColor("--grid-fill", "rgba(255, 255, 255, 0.5)"),
+    gridStroke: cssColor("--grid-stroke", "rgba(17, 17, 17, 0.18)"),
+    previewFill: cssColor("--preview-fill", "rgba(35, 122, 59, 0.08)"),
+    previewStroke: cssColor("--preview-stroke", "rgba(35, 122, 59, 0.42)"),
+    hoverFill: cssColor("--hover-fill", "rgba(139, 0, 0, 0.08)"),
+    red: cssColor("--red", "#8b0000"),
+    tileFace: cssColor("--tile-face", "#fffffc"),
+    tileText: cssColor("--tile-text", "#111"),
+    tileSubtext: cssColor("--tile-subtext", "rgba(17, 17, 17, 0.62)"),
+    tileCanvasShadow: cssColor("--tile-canvas-shadow", "rgba(17, 17, 17, 0.16)"),
+    tileFillAlpha: cssNumber("--tile-fill-alpha", 0.16),
+    tileHighlightAlpha: cssNumber("--tile-highlight-alpha", 0.26),
+    currentPlayer: cssColor("--current-player", "#0072b2"),
+    otherPlayer: cssColor("--other-player", "#d55e00"),
+    otherPlayers: cssColorList("--other-player-colors", ["#d55e00"])
+  };
+}
+
+function cssColor(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+function cssColorList(name, fallback = []) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const colors = value.split(",").map(color => color.trim()).filter(Boolean);
+  return colors.length ? colors : fallback;
+}
+
+function cssNumber(name, fallback) {
+  const value = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
+  return Number.isFinite(value) ? value : fallback;
 }
 
 function colorToRgba(hex, alpha) {
@@ -2363,6 +2523,13 @@ function updateTouchGesture() {
 }
 
 function wireEvents() {
+  document.addEventListener("click", event => {
+    const button = event.target.closest(".theme-toggle[data-action='toggle-theme']");
+    if (!button) return;
+    event.preventDefault();
+    toggleTheme();
+  });
+
   window.addEventListener("keydown", event => {
     if (event.key === "Escape" && ui.confirmation) {
       event.preventDefault();
@@ -2850,6 +3017,7 @@ function reloadForAppUpdate() {
   globalThis.location.reload();
 }
 
+initTheme();
 if (deriveFriendsFromLocalGames()) saveAppState(appState);
 wireEvents();
 renderAll();
