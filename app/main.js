@@ -21,7 +21,7 @@ import {
   validateMove
 } from "./model.js";
 import { loadAppState, saveAppState } from "./storage.js";
-import { GameSync, fetchPlayerInvites, fetchRemoteGameState, joinRemoteGame, remoteGameExists } from "./sync.js";
+import { GameSync, fetchPlayerGameRefs, fetchRemoteGameState, joinRemoteGame, remoteGameExists } from "./sync.js";
 
 const HEX_SIZE = 34;
 const MIN_SCALE = 0.35;
@@ -41,6 +41,9 @@ const ui = {
   joinCode: "",
   joinError: "",
   joinChecking: false,
+  linkDeviceOpen: false,
+  linkDeviceCode: "",
+  linkDeviceError: "",
   selectedFriendIds: new Set(),
   leaderboardOpen: false,
   historyOpen: false,
@@ -71,7 +74,7 @@ let sync = null;
 let toastTimer = null;
 const homeSyncs = new Map();
 const homeSyncChecks = new Set();
-let inviteInboxInFlight = false;
+let playerGamesInFlight = false;
 let appUpdateFingerprint = "";
 let appUpdateCheckInFlight = false;
 let appUpdateReloadPending = false;
@@ -176,16 +179,16 @@ function showNewGameIfEmpty() {
   return true;
 }
 
-async function syncInviteInbox(options = {}) {
-  if (!appState.session?.playerId || inviteInboxInFlight) return;
+async function syncPlayerGames(options = {}) {
+  if (!appState.session?.playerId || playerGamesInFlight) return;
   const wasEmpty = !Object.keys(appState.games || {}).length;
   let importedGame = false;
-  inviteInboxInFlight = true;
+  playerGamesInFlight = true;
 
   try {
-    const { invites } = await fetchPlayerInvites(appState.session.playerId);
-    for (const invite of invites || []) {
-      const roomId = normalizeRoomId(invite?.gameId);
+    const { games } = await fetchPlayerGameRefs(appState.session.playerId);
+    for (const gameRef of games || []) {
+      const roomId = normalizeRoomId(gameRef?.gameId || gameRef?.id);
       if (!roomId) continue;
       try {
         const remote = await fetchRemoteGameState(roomId);
@@ -193,7 +196,7 @@ async function syncInviteInbox(options = {}) {
         importedGame = Boolean(stored.id) || importedGame;
         mergeFriends(Object.values(remote.players || {}));
       } catch {
-        // Invite discovery should never make the local list unusable.
+        // Game discovery should never make the local list unusable.
       }
     }
     deriveFriendsFromLocalGames();
@@ -206,7 +209,7 @@ async function syncInviteInbox(options = {}) {
     showNewGameIfEmpty();
     if (options.render !== false && ui.screen === "new-game") renderAll();
   } finally {
-    inviteInboxInFlight = false;
+    playerGamesInFlight = false;
   }
 }
 
@@ -339,7 +342,7 @@ function renderAll() {
 }
 
 function startHomeStreams() {
-  syncInviteInbox();
+  syncPlayerGames();
   const ids = Object.keys(appState.games || {}).map(normalizeRoomId).filter(Boolean);
   const idSet = new Set(ids);
 
@@ -398,7 +401,7 @@ async function ensureHomeStream(roomId) {
 function renderSetup() {
   const name = appState.session?.playerName || "";
   const hasSession = Boolean(appState.session?.playerId);
-  const accountLink = hasSession ? getAccountLink(name) : "";
+  const accountLinkCode = hasSession ? getAccountLinkCode(name) : "";
 
   $("setup-content").innerHTML = `
     <h1>hexabloom</h1>
@@ -406,18 +409,29 @@ function renderSetup() {
     <label class="field-label" for="setup-name">Your name</label>
     <input type="text" class="field-input setup-input" id="setup-name" value="${esc(name)}" placeholder="Name" autocomplete="off" spellcheck="false">
     ${hasSession ? `
-      <label class="field-label" for="account-link">Account link</label>
+      <label class="field-label" for="account-link">Link code</label>
       <div class="copy-field">
-        <input type="text" class="field-input copy-input" id="account-link" value="${esc(accountLink)}" readonly>
+        <input type="text" class="field-input copy-input" id="account-link" value="${esc(accountLinkCode)}" readonly>
         <button class="action-link" type="button" data-action="copy-account-link">Copy</button>
       </div>
     ` : ""}
     <div class="detail-actions setup-actions">
       <button class="action-link primary" type="button" data-action="join-board">${hasSession ? "OK" : "Join"}</button>
+      <button class="action-link muted" type="button" data-action="toggle-link-device">${ui.linkDeviceOpen ? "Cancel link" : "Link from other device"}</button>
       ${hasSession ? '<button class="action-link muted" type="button" data-action="close-setup">Cancel</button>' : ""}
     </div>
+    ${ui.linkDeviceOpen ? `
+      <div class="link-device-form">
+        <label class="field-label" for="link-device-code">Link code</label>
+        <div class="copy-field">
+          <input type="text" class="field-input copy-input" id="link-device-code" value="${esc(ui.linkDeviceCode)}" placeholder="Paste code or account link" autocomplete="off" spellcheck="false">
+          <button class="action-link primary" type="button" data-action="apply-link-device">Link</button>
+        </div>
+        ${ui.linkDeviceError ? `<p class="join-error">${esc(ui.linkDeviceError)}</p>` : ""}
+      </div>
+    ` : ""}
   `;
-  setTimeout(() => $("setup-name")?.focus(), 0);
+  setTimeout(() => (ui.linkDeviceOpen ? $("link-device-code") : $("setup-name"))?.focus(), 0);
 }
 
 function renderHome() {
@@ -567,6 +581,14 @@ function getAccountLink(name = appState.session?.playerName || "") {
   return url.toString();
 }
 
+function getAccountLinkCode(name = appState.session?.playerName || "") {
+  const playerId = appState.session?.playerId || "";
+  const playerName = normalizePlayerName(name) || appState.session?.playerName || "";
+  if (!playerId || !playerName) return "";
+  const games = Object.keys(appState.games || {}).map(normalizeRoomId).filter(Boolean);
+  return `hb1.${encodeLinkPayload({ player: playerId, name: playerName, games })}`;
+}
+
 function getGameLink(gameId) {
   const roomId = normalizeRoomId(gameId);
   const url = new URL(globalThis.location?.href || "http://localhost:8031/");
@@ -632,6 +654,61 @@ function applyLinkedParamsFromUrl(state) {
 
 function normalizeLinkedPlayerId(value) {
   return String(value || "").trim().slice(0, 128);
+}
+
+function normalizeLinkedGameIds(input = []) {
+  const values = Array.isArray(input)
+    ? input
+    : String(input || "").split(/[\s,]+/);
+  return values.map(normalizeRoomId).filter(Boolean).slice(0, 100);
+}
+
+function parseAccountLinkCode(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return null;
+
+  const payload = raw.toLowerCase().startsWith("hb1.")
+    ? decodeLinkPayload(raw.slice(4))
+    : accountPayloadFromUrl(raw);
+
+  const playerId = normalizeLinkedPlayerId(payload?.player || payload?.playerId || payload?.id);
+  const playerName = normalizePlayerName(payload?.name || payload?.playerName);
+  const gameId = normalizeRoomId(payload?.game || payload?.room || payload?.roomId);
+  const gameIds = normalizeLinkedGameIds(payload?.games || payload?.gameIds);
+  if (gameId) gameIds.unshift(gameId);
+  if (!playerId || !playerName) return null;
+  return { playerId, playerName, gameId, gameIds: [...new Set(gameIds)] };
+}
+
+function accountPayloadFromUrl(raw) {
+  const params = raw.includes("=") && !raw.includes("?")
+    ? new URLSearchParams(raw.replace(/^[?#]/, ""))
+    : new URL(raw, globalThis.location?.href || "http://localhost:8031/").searchParams;
+
+  return {
+    player: params.get("player"),
+    playerId: params.get("playerId"),
+    name: params.get("name"),
+    playerName: params.get("playerName"),
+    game: params.get("game"),
+    games: params.get("games"),
+    room: params.get("room"),
+    roomId: params.get("roomId")
+  };
+}
+
+function encodeLinkPayload(payload) {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeLinkPayload(value) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
 }
 
 function renderHud() {
@@ -922,7 +999,80 @@ async function savePlayerName(nameInput) {
   ui.newGameLength = DEFAULT_GAME_LENGTH;
   ui.screen = Object.keys(appState.games || {}).length ? "home" : "new-game";
   renderAll();
-  syncInviteInbox({ openHomeOnImport: true });
+  syncPlayerGames({ openHomeOnImport: true });
+}
+
+async function linkFromOtherDevice(codeInput = ui.linkDeviceCode) {
+  let linked;
+  try {
+    linked = parseAccountLinkCode(codeInput);
+  } catch {
+    linked = null;
+  }
+
+  if (!linked) {
+    ui.linkDeviceError = "link code not found";
+    renderAll();
+    return;
+  }
+
+  sync?.stop();
+  sync = null;
+  stopHomeStreams();
+
+  const changedAccount = appState.session?.playerId !== linked.playerId;
+  appState.session = {
+    roomId: linked.gameId || appState.activeGameId || GLOBAL_ROOM_ID,
+    playerId: linked.playerId,
+    playerName: linked.playerName
+  };
+  if (changedAccount) appState.pendingMovesByGame = {};
+
+  if (linked.gameId) {
+    appState.linkedGameId = linked.gameId;
+    appState.activeGameId = linked.gameId;
+    if (!appState.games[linked.gameId]) appState.games[linked.gameId] = createGameState({ id: linked.gameId });
+  }
+
+  for (const roomId of linked.gameIds || []) {
+    if (!appState.games[roomId]) appState.games[roomId] = createGameState({ id: roomId });
+  }
+
+  ui.linkDeviceOpen = false;
+  ui.linkDeviceCode = "";
+  ui.linkDeviceError = "";
+  ui.nameReturnScreen = "home";
+  saveAppState(appState);
+
+  if (linked.gameId) {
+    await openGame(linked.gameId);
+    return;
+  }
+
+  await importLinkedGames(linked.gameIds);
+
+  ui.newGameLength = DEFAULT_GAME_LENGTH;
+  ui.screen = Object.keys(appState.games || {}).length ? "home" : "new-game";
+  renderAll();
+  syncPlayerGames({ openHomeOnImport: true });
+}
+
+async function importLinkedGames(gameIds = []) {
+  let imported = false;
+
+  for (const roomId of gameIds) {
+    try {
+      const remote = await fetchRemoteGameState(roomId);
+      storeGame(remote);
+      mergeFriends(Object.values(remote.players || {}));
+      imported = true;
+    } catch {
+      // A link code can still restore the player while offline.
+    }
+  }
+
+  if (imported) saveAppState(appState);
+  return imported;
 }
 
 async function createNewGame() {
@@ -1725,12 +1875,24 @@ function wireEvents() {
     if (!action) return;
 
     if (action === "copy-account-link") {
-      const link = getAccountLink($("setup-name")?.value || appState.session?.playerName || "");
+      const link = getAccountLinkCode($("setup-name")?.value || appState.session?.playerName || "");
       const input = $("account-link");
       if (input) input.value = link;
       copyText(link)
         .then(() => toast("copied"))
         .catch(() => toast("copy failed"));
+      return;
+    }
+
+    if (action === "toggle-link-device") {
+      ui.linkDeviceOpen = !ui.linkDeviceOpen;
+      ui.linkDeviceError = "";
+      renderAll();
+      return;
+    }
+
+    if (action === "apply-link-device") {
+      linkFromOtherDevice($("link-device-code")?.value || "");
       return;
     }
 
@@ -1778,12 +1940,23 @@ function wireEvents() {
     if (event.key === "Enter" && event.target.id === "setup-name") {
       savePlayerName($("setup-name").value);
     }
+
+    if (event.key === "Enter" && event.target.id === "link-device-code") {
+      linkFromOtherDevice($("link-device-code")?.value || "");
+    }
   });
 
   $("setup-screen").addEventListener("input", event => {
-    if (event.target.id !== "setup-name") return;
-    const accountLink = $("account-link");
-    if (accountLink) accountLink.value = getAccountLink(event.target.value);
+    if (event.target.id === "setup-name") {
+      const accountLink = $("account-link");
+      if (accountLink) accountLink.value = getAccountLinkCode(event.target.value);
+      return;
+    }
+
+    if (event.target.id === "link-device-code") {
+      ui.linkDeviceCode = event.target.value;
+      ui.linkDeviceError = "";
+    }
   });
 
   $("home-screen").addEventListener("click", event => {
@@ -1794,7 +1967,7 @@ function wireEvents() {
     if (action === "new-game") {
       ui.newGameLength = DEFAULT_GAME_LENGTH;
       ui.selectedFriendIds.clear();
-      syncInviteInbox();
+      syncPlayerGames();
       ui.joinOpen = false;
       ui.joinError = "";
       ui.screen = "new-game";

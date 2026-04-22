@@ -218,13 +218,16 @@ export async function fetchRemoteGameState(roomId, settings = loadSettings()) {
   return createGameState(payload.state || payload.game || payload);
 }
 
-export async function fetchPlayerInvites(playerId, settings = loadSettings()) {
-  if (!settings.apiBaseUrl || !playerId) return { invites: [] };
-  const response = await fetch(getPlayerEndpoint(settings.apiBaseUrl, playerId, "/invites"));
+export async function fetchPlayerGameRefs(playerId, settings = loadSettings()) {
+  if (!settings.apiBaseUrl || !playerId) return { games: [] };
+  let response = await fetch(getPlayerEndpoint(settings.apiBaseUrl, playerId, "/games"));
+  if (response.status === 404) {
+    response = await fetch(getPlayerEndpoint(settings.apiBaseUrl, playerId, "/invites"));
+  }
   if (!response.ok) throw await responseError(response);
   const payload = await response.json();
   return {
-    invites: Array.isArray(payload.invites) ? payload.invites : []
+    games: Array.isArray(payload.games) ? payload.games : Array.isArray(payload.invites) ? payload.invites : []
   };
 }
 

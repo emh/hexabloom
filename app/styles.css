@@ -1029,6 +1029,10 @@ body.no-scroll {
   padding-bottom: 8px;
 }
 
+.link-device-form {
+  margin-top: 22px;
+}
+
 .setup-input {
   text-transform: none;
 }

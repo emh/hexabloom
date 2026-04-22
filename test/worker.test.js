@@ -20,9 +20,9 @@ test("parseGameRoute recognizes game API routes", () => {
   assert.equal(parseGameRoute("/api/groups/ABC123/sync"), null);
 });
 
-test("parsePlayerRoute recognizes player invite routes", () => {
+test("parsePlayerRoute recognizes player sync routes", () => {
+  assert.deepEqual(parsePlayerRoute("/player/p1/games"), { playerId: "p1", action: "games" });
   assert.deepEqual(parsePlayerRoute("/player/p1/invites"), { playerId: "p1", action: "invites" });
   assert.deepEqual(parsePlayerRoute("/player/player%201/invites"), { playerId: "player 1", action: "invites" });
   assert.equal(parsePlayerRoute("/player/p1/friends"), null);
-  assert.equal(parsePlayerRoute("/player/p1/games"), null);
 });

@@ -89,7 +89,7 @@ export class GameRoom {
       invited.push(result.player);
     }
     await this.save();
-    if (invited.length) await enqueueInvites(this.env, this.game, invited, joined.player);
+    await rememberGameMemberships(this.env, this.game, [joined.player, ...invited], invited, joined.player);
     this.broadcast(null, { type: "state", state: this.game });
     return json({ state: this.game, player: joined.player, invited, created: joined.created }, 200, cors);
   }
@@ -257,23 +257,27 @@ export class InviteInbox {
 
     const url = new URL(request.url);
 
-    if (url.pathname === "/internal/invite" && request.method === "POST") {
+    if ((url.pathname === "/internal/games" || url.pathname === "/internal/invite") && request.method === "POST") {
       const body = await readJson(request);
-      await this.addInvites(body);
+      await this.addGameRefs(body);
       return json({ ok: true }, 200, cors);
     }
 
     const route = parsePlayerRoute(url.pathname);
     if (!route) return json({ error: "Not found" }, 404, cors);
 
+    if (route.action === "games" && request.method === "GET") {
+      return json({ games: this.playerGames(route.playerId) }, 200, cors);
+    }
+
     if (route.action === "invites" && request.method === "GET") {
-      return json({ invites: this.playerInvites(route.playerId) }, 200, cors);
+      return json({ invites: this.playerGames(route.playerId) }, 200, cors);
     }
 
     return json({ error: "Not found" }, 404, cors);
   }
 
-  async addInvites(input = {}) {
+  async addGameRefs(input = {}) {
     const gameId = normalizeRoomId(input.gameId);
     if (!gameId) return;
 
@@ -281,23 +285,34 @@ export class InviteInbox {
       id: String(input.invitedBy?.id || "").trim().slice(0, 128),
       name: normalizePlayerName(input.invitedBy?.name) || "Player"
     };
-    const invitedAt = typeof input.invitedAt === "string" ? input.invitedAt : new Date().toISOString();
+    const now = new Date().toISOString();
+    const invitedAt = typeof input.invitedAt === "string" ? input.invitedAt : now;
+    const updatedAt = typeof input.updatedAt === "string" ? input.updatedAt : now;
+    const players = normalizeInvites(input.players || input.invites, 100);
+    const invitedIds = new Set(normalizeInvites(input.invites).map(invite => invite.playerId));
 
-    for (const invite of normalizeInvites(input.invites)) {
-      this.inboxes[invite.playerId] ||= {};
-      this.inboxes[invite.playerId][gameId] = {
+    for (const player of players) {
+      this.inboxes[player.playerId] ||= {};
+      const previous = this.inboxes[player.playerId][gameId] || {};
+      this.inboxes[player.playerId][gameId] = {
+        ...previous,
         gameId,
-        invitedAt,
-        invitedBy: inviter
+        updatedAt,
+        joinedAt: previous.joinedAt || updatedAt
       };
+
+      if (invitedIds.has(player.playerId)) {
+        this.inboxes[player.playerId][gameId].invitedAt = invitedAt;
+        this.inboxes[player.playerId][gameId].invitedBy = inviter;
+      }
     }
 
     await this.state.storage.put("inboxes", this.inboxes);
   }
 
-  playerInvites(playerId) {
+  playerGames(playerId) {
     const inbox = this.inboxes[String(playerId || "").trim().slice(0, 128)] || {};
-    return Object.values(inbox).sort((left, right) => Date.parse(right.invitedAt) - Date.parse(left.invitedAt));
+    return Object.values(inbox).sort((left, right) => Date.parse(right.updatedAt || right.invitedAt || "") - Date.parse(left.updatedAt || left.invitedAt || ""));
   }
 }
 
@@ -347,7 +362,7 @@ export function parseGameRoute(pathname) {
 }
 
 export function parsePlayerRoute(pathname) {
-  const match = /^\/player\/([^/]+)\/(invites)\/?$/.exec(pathname);
+  const match = /^\/player\/([^/]+)\/(games|invites)\/?$/.exec(pathname);
   if (!match) return null;
   return {
     playerId: decodeURIComponent(match[1]).trim().slice(0, 128),
@@ -403,7 +418,7 @@ function hasOversizedRacks(game) {
   return Object.values(game?.players || {}).some(player => Array.isArray(player?.rack) && player.rack.length > RACK_SIZE);
 }
 
-function normalizeInvites(input = []) {
+function normalizeInvites(input = [], limit = 20) {
   if (!Array.isArray(input)) return [];
   const seen = new Set();
   const invites = [];
@@ -416,30 +431,32 @@ function normalizeInvites(input = []) {
       playerId,
       name: normalizePlayerName(item?.name) || "Player"
     });
-    if (invites.length >= 20) break;
+    if (invites.length >= limit) break;
   }
 
   return invites;
 }
 
-async function enqueueInvites(env, game, invites, invitedBy) {
-  if (!env.INVITE_INBOX || !game?.id || !invites?.length) return;
+async function rememberGameMemberships(env, game, players, invites = [], invitedBy = null) {
+  if (!env.INVITE_INBOX || !game?.id || !players?.length) return;
 
   try {
     const id = env.INVITE_INBOX.idFromName("invites");
     const inbox = env.INVITE_INBOX.get(id);
-    await inbox.fetch("https://invite-inbox/internal/invite", {
+    await inbox.fetch("https://invite-inbox/internal/games", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         gameId: game.id,
+        players,
         invites,
         invitedBy,
-        invitedAt: new Date().toISOString()
+        invitedAt: new Date().toISOString(),
+        updatedAt: game.updatedAt
       })
     });
   } catch {
-    // Game state is still authoritative if the invite relay is temporarily unavailable.
+    // Game state is still authoritative if the membership relay is temporarily unavailable.
   }
 }
 
