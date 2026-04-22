@@ -17,11 +17,12 @@ import {
   orderedPlayers,
   playerTilesLeft,
   randomRoomId,
+  removePlayerFromGame as removePlayerLocally,
   resetGameState,
   validateMove
 } from "./model.js";
-import { loadAppState, saveAppState } from "./storage.js";
-import { GameSync, fetchPlayerGameRefs, fetchRemoteGameState, joinRemoteGame, remoteGameExists } from "./sync.js";
+import { createInitialState, loadAppState, saveAppState } from "./storage.js";
+import { GameSync, deleteRemoteAccount, fetchPlayerGameRefs, fetchRemoteGameState, joinRemoteGame, remoteGameExists, removeRemotePlayer } from "./sync.js";
 
 const HEX_SIZE = 34;
 const MIN_SCALE = 0.35;
@@ -44,12 +45,14 @@ const ui = {
   linkDeviceOpen: false,
   linkDeviceCode: "",
   linkDeviceError: "",
+  deletingAccount: false,
   selectedFriendIds: new Set(),
   leaderboardOpen: false,
   historyOpen: false,
   syncStatus: "idle",
   localOnly: false,
   notice: null,
+  confirmation: null,
   staged: [],
   hoverHex: null,
   dragging: null,
@@ -303,6 +306,7 @@ function renderAll() {
   $("home-screen").classList.toggle("active", showHome || showGame || showHomeUnderSetup);
   $("leaderboard-screen").classList.toggle("active", ui.leaderboardOpen && showGame);
   $("history-screen").classList.toggle("active", ui.historyOpen && showGame);
+  renderConfirmationToast();
 
   if (showSetup) {
     ui.leaderboardOpen = false;
@@ -420,6 +424,11 @@ function renderSetup() {
       <button class="action-link muted" type="button" data-action="toggle-link-device">${ui.linkDeviceOpen ? "Cancel link" : "Link from other device"}</button>
       ${hasSession ? '<button class="action-link muted" type="button" data-action="close-setup">Cancel</button>' : ""}
     </div>
+    ${hasSession ? `
+      <div class="account-delete-row">
+        <button class="action-link danger" type="button" data-action="delete-account" ${ui.deletingAccount ? "disabled" : ""}>${ui.deletingAccount ? "Deleting..." : "Delete account"}</button>
+      </div>
+    ` : ""}
     ${ui.linkDeviceOpen ? `
       <div class="link-device-form">
         <label class="field-label" for="link-device-code">Link code</label>
@@ -745,10 +754,14 @@ function renderLeaderboard() {
   const rows = players.length ? players.map((player, index) => `
     <div class="leaderboard-row">
       <span>${index + 1}</span>
-      <strong>${esc(player.name)}</strong>
+      <strong class="leaderboard-player-name">
+        <span>${esc(player.name)}</span>
+        ${player.isOwner ? '<small>owner</small>' : ""}
+      </strong>
       <span>${player.turnCount}</span>
       <span>${player.score}</span>
       <span>${player.tilesLeft}</span>
+      <span>${player.canRemove ? `<button class="action-link muted leaderboard-remove" type="button" data-action="remove-player" data-player-id="${esc(player.id)}">Remove</button>` : ""}</span>
     </div>
   `).join("") : '<p class="leaderboard-empty">No players yet.</p>';
 
@@ -764,6 +777,7 @@ function renderLeaderboard() {
         <span>turns</span>
         <span>score</span>
         <span>tiles</span>
+        <span></span>
       </div>
       ${rows}
     </div>
@@ -845,11 +859,18 @@ function leaderboardPlayers() {
     turnCounts.set(move.playerId, (turnCounts.get(move.playerId) || 0) + 1);
   }
 
+  const currentPlayerIsOwner = isCurrentPlayerOwner();
   return orderedPlayers(game.players).map(player => ({
     ...player,
+    isOwner: player.id === game.ownerId,
+    canRemove: currentPlayerIsOwner && player.id !== game.ownerId,
     turnCount: turnCounts.get(player.id) || 0,
     tilesLeft: playerTilesLeft(player)
   }));
+}
+
+function isCurrentPlayerOwner() {
+  return Boolean(game?.ownerId && appState.session?.playerId === game.ownerId);
 }
 
 function renderTray() {
@@ -938,6 +959,61 @@ function renderPreview() {
     <span>${detail ? esc(detail) : ""}</span>
   `;
   $("commit-btn").disabled = !preview.valid || ui.flushing;
+}
+
+function renderConfirmationToast() {
+  const strip = $("confirmation-strip");
+  const confirmation = ui.confirmation;
+  strip.hidden = !confirmation;
+  strip.classList.toggle("notice", Boolean(confirmation && confirmation.tone !== "danger"));
+  strip.classList.toggle("invalid", Boolean(confirmation?.tone === "danger"));
+  if (!confirmation) {
+    strip.innerHTML = "";
+    return;
+  }
+
+  strip.innerHTML = `
+    <span>${esc(confirmation.message)}</span>
+    <span class="confirmation-detail">${confirmation.detail ? esc(confirmation.detail) : ""}</span>
+    <span class="confirmation-actions">
+      <button class="action-link danger" type="button" data-action="confirm-yes">${esc(confirmation.yesText || "Yes")}</button>
+      <button class="action-link muted" type="button" data-action="confirm-no">${esc(confirmation.noText || "No")}</button>
+    </span>
+  `;
+}
+
+function askConfirmation(options = {}) {
+  ui.confirmation = {
+    message: String(options.message || "Are you sure?"),
+    detail: String(options.detail || ""),
+    yesText: String(options.yesText || "Yes"),
+    noText: String(options.noText || "No"),
+    tone: options.tone === "danger" ? "danger" : "notice",
+    onConfirm: typeof options.onConfirm === "function" ? options.onConfirm : null,
+    onCancel: typeof options.onCancel === "function" ? options.onCancel : null
+  };
+  renderAll();
+}
+
+function clearConfirmation() {
+  ui.confirmation = null;
+  renderConfirmationToast();
+}
+
+function confirmCurrentAction() {
+  const confirmation = ui.confirmation;
+  if (!confirmation) return;
+  ui.confirmation = null;
+  renderAll();
+  confirmation.onConfirm?.();
+}
+
+function cancelCurrentAction() {
+  const confirmation = ui.confirmation;
+  if (!confirmation) return;
+  ui.confirmation = null;
+  renderAll();
+  confirmation.onCancel?.();
 }
 
 function getPreview() {
@@ -1192,11 +1268,13 @@ async function openGame(gameId, options = {}) {
   renderAll();
 
   try {
+    const seedState = hasGameDataForSync(game) ? game : null;
     const payload = await joinRemoteGame({
       roomId,
       playerId: appState.session.playerId,
       name: appState.session.playerName,
-      tileBagCount: options.tileBagCount || game.tileBagCount
+      tileBagCount: options.tileBagCount || game.tileBagCount,
+      state: seedState
     });
     game = storeGame(payload.state);
     appState.activeGameId = game.id;
@@ -1227,6 +1305,148 @@ async function openGame(gameId, options = {}) {
     renderAll();
     if (!options.silent) toast(joined.created ? `local game: ${error.message}` : "local game");
   }
+}
+
+async function removePlayerFromCurrentGame(playerId) {
+  const targetId = String(playerId || "");
+  const ownerId = appState.session?.playerId || "";
+  const target = game?.players?.[targetId];
+  if (!game?.id || !target) return;
+
+  if (!ownerId || ownerId !== game.ownerId) {
+    toast("only the owner can remove players");
+    return;
+  }
+
+  askConfirmation({
+    message: `Remove ${target.name}?`,
+    detail: "Their words stay.",
+    yesText: "Yes",
+    noText: "No",
+    tone: "danger",
+    onConfirm: () => performRemovePlayerFromCurrentGame(targetId)
+  });
+}
+
+async function performRemovePlayerFromCurrentGame(targetId) {
+  const ownerId = appState.session?.playerId || "";
+  const previousStatus = ui.syncStatus;
+  try {
+    if (ui.localOnly) {
+      const result = removePlayerLocally(game, { playerId: targetId });
+      game = storeGame(result.state);
+      ui.syncStatus = "local";
+    } else {
+      ui.syncStatus = "syncing";
+      renderHud();
+      const payload = await removeRemotePlayer({ roomId: game.id, ownerId, playerId: targetId });
+      game = storeGame(payload.state);
+      ui.syncStatus = "synced";
+    }
+
+    mergeFriends(Object.values(game.players || {}));
+    markGameSeen(game.id);
+    save();
+    renderAll();
+    toast("player removed");
+  } catch (error) {
+    ui.syncStatus = ui.localOnly ? "local" : previousStatus;
+    renderAll();
+    toast(error?.message || "could not remove player");
+  }
+}
+
+async function deleteCurrentAccount() {
+  const playerId = appState.session?.playerId || "";
+  if (!playerId || ui.deletingAccount) return;
+
+  askConfirmation({
+    message: "Delete account?",
+    detail: "Removes you from every game and deletes local data.",
+    yesText: "Yes",
+    noText: "No",
+    tone: "danger",
+    onConfirm: performDeleteCurrentAccount
+  });
+}
+
+async function performDeleteCurrentAccount() {
+  const playerId = appState.session?.playerId || "";
+  if (!playerId || ui.deletingAccount) return;
+  ui.deletingAccount = true;
+  renderAll();
+
+  try {
+    await deleteRemoteAccount({ playerId, gameIds: localGameIds() });
+  } catch (error) {
+    ui.deletingAccount = false;
+    renderAll();
+    toast(error?.message || "could not delete account");
+    return;
+  }
+
+  sync?.stop();
+  sync = null;
+  stopHomeStreams();
+  game = null;
+  resetLocalState();
+  resetUiAfterAccountDelete();
+  saveAppState(appState);
+  renderAll();
+  toast("account deleted");
+}
+
+function localGameIds() {
+  return Object.keys(appState.games || {}).map(normalizeRoomId).filter(Boolean);
+}
+
+function hasGameDataForSync(state) {
+  const normalized = createGameState(state || {});
+  return Boolean(
+    normalized.id &&
+    (
+      Object.keys(normalized.players || {}).length ||
+      Object.keys(normalized.board || {}).length ||
+      normalized.moves?.length
+    )
+  );
+}
+
+function resetLocalState() {
+  const next = createInitialState();
+  for (const key of Object.keys(appState)) delete appState[key];
+  Object.assign(appState, next);
+}
+
+function resetUiAfterAccountDelete() {
+  ui.screen = "setup";
+  ui.nameReturnScreen = "home";
+  ui.shareGameId = null;
+  ui.newGameLength = DEFAULT_GAME_LENGTH;
+  ui.joinOpen = false;
+  ui.joinCode = "";
+  ui.joinError = "";
+  ui.joinChecking = false;
+  ui.linkDeviceOpen = false;
+  ui.linkDeviceCode = "";
+  ui.linkDeviceError = "";
+  ui.deletingAccount = false;
+  ui.selectedFriendIds.clear();
+  ui.leaderboardOpen = false;
+  ui.historyOpen = false;
+  ui.syncStatus = "idle";
+  ui.localOnly = false;
+  ui.notice = null;
+  ui.confirmation = null;
+  ui.staged = [];
+  ui.hoverHex = null;
+  ui.dragging = null;
+  ui.pan = null;
+  ui.gesture = null;
+  ui.pointers.clear();
+  ui.flushing = false;
+  ui.resetting = false;
+  ui.camera = { x: 0, y: 0, scale: 1 };
 }
 
 function goHome() {
@@ -1861,11 +2081,29 @@ function updateTouchGesture() {
 
 function wireEvents() {
   window.addEventListener("keydown", event => {
+    if (event.key === "Escape" && ui.confirmation) {
+      event.preventDefault();
+      cancelCurrentAction();
+      return;
+    }
+
     if (!isHardResetHotkey(event)) return;
     event.preventDefault();
     event.stopPropagation();
     hardResetBoard();
   }, true);
+
+  $("confirmation-strip").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action === "confirm-yes") {
+      confirmCurrentAction();
+      return;
+    }
+
+    if (action === "confirm-no") {
+      cancelCurrentAction();
+    }
+  });
 
   $("setup-screen").addEventListener("click", event => {
     const action = event.target.closest("[data-action]")?.dataset.action;
@@ -1903,6 +2141,11 @@ function wireEvents() {
 
     if (action === "join-board") {
       savePlayerName($("setup-name").value);
+      return;
+    }
+
+    if (action === "delete-account") {
+      deleteCurrentAccount();
       return;
     }
 
@@ -2037,7 +2280,13 @@ function wireEvents() {
   });
 
   $("leaderboard-screen").addEventListener("click", event => {
-    const action = event.target.closest("[data-action]")?.dataset.action;
+    const target = event.target.closest("[data-action]");
+    const action = target?.dataset.action;
+    if (action === "remove-player") {
+      removePlayerFromCurrentGame(target.closest("[data-player-id]")?.dataset.playerId);
+      return;
+    }
+
     if (action === "close-leaderboard" || event.target.id === "leaderboard-screen") {
       ui.leaderboardOpen = false;
       renderAll();

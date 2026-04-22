@@ -21,3 +21,4 @@ new_sqlite_classes = [ "InviteInbox" ]
 
 [vars]
 ALLOWED_ORIGINS = "http://localhost:8031,http://127.0.0.1:8031,http://192.168.1.148:8031,https://emh.github.io,https://emh.io"
+SYNC_CACHE_TTL_DAYS = "30"

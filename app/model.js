@@ -239,6 +239,7 @@ export function createPlayer(input = {}) {
 export function createGameState(input = {}) {
   const board = normalizeBoard(input.board);
   const players = {};
+  const removedPlayers = normalizeRemovedPlayers(input.removedPlayers);
   const tileBagCount = normalizeTileBagCount(
     input.tileBagCount ?? input.bagCount ?? GAME_LENGTHS[normalizeGameLength(input.gameLength)].tileBagCount
   );
@@ -250,12 +251,16 @@ export function createGameState(input = {}) {
     }
   }
 
+  const ownerId = normalizeOwnerId(input.ownerId, players);
+
   return {
     id: normalizeRoomId(input.id),
+    ownerId,
     tileBagCount,
     gameLength: gameLengthFromTileBagCount(tileBagCount),
     board,
     players,
+    removedPlayers,
     moves: Array.isArray(input.moves) ? input.moves.map(normalizeMoveRecord).filter(Boolean) : [],
     bounds: recomputeBoardBounds(board),
     createdAt: typeof input.createdAt === "string" ? input.createdAt : new Date().toISOString(),
@@ -284,8 +289,10 @@ export function resetGameState(inputState, options = {}) {
 
   return createGameState({
     id: state.id,
+    ownerId: state.ownerId,
     tileBagCount: state.tileBagCount,
     players,
+    removedPlayers: state.removedPlayers,
     createdAt: state.createdAt,
     updatedAt: new Date().toISOString()
   });
@@ -296,6 +303,10 @@ export function joinGame(inputState, input = {}) {
   const id = String(input.playerId || input.id || createId());
   const name = normalizePlayerName(input.name) || "Player";
   const existing = state.players[id];
+
+  if (!existing && state.removedPlayers[id]) {
+    throw new GameRuleError("Player has been removed from this board");
+  }
 
   if (existing) {
     existing.name = name;
@@ -308,8 +319,29 @@ export function joinGame(inputState, input = {}) {
 
   const player = createPlayer({ id, name, tileBagCount: state.tileBagCount });
   state.players[player.id] = player;
+  if (!state.ownerId) state.ownerId = player.id;
   state.updatedAt = new Date().toISOString();
   return { state, player, created: true };
+}
+
+export function removePlayerFromGame(inputState, input = {}) {
+  const state = createGameState(inputState);
+  const playerId = String(input.playerId || input.targetPlayerId || "").trim().slice(0, 128);
+  if (!playerId) throw new GameRuleError("Player is required");
+  if (!state.players[playerId]) throw new GameRuleError("Player is not in this board");
+  if (playerId === state.ownerId && !input.allowOwnerRemoval) throw new GameRuleError("Board owner cannot be removed");
+
+  const player = state.players[playerId];
+  delete state.players[playerId];
+  if (playerId === state.ownerId) state.ownerId = Object.keys(state.players)[0] || "";
+  state.removedPlayers[playerId] = {
+    id: player.id,
+    name: input.redactPlayerData ? "" : player.name,
+    removedAt: new Date().toISOString()
+  };
+  if (input.redactPlayerData) redactPlayerDataFromGame(state, playerId);
+  state.updatedAt = new Date().toISOString();
+  return { state, player };
 }
 
 export function createMove(playerId, placements, timestamp = Date.now()) {
@@ -653,6 +685,47 @@ function normalizeMoveRecord(input = {}) {
     score: Math.max(0, Number.parseInt(input.score, 10) || 0),
     words: Array.isArray(input.words) ? input.words : []
   };
+}
+
+function normalizeOwnerId(input, players = {}) {
+  const id = typeof input === "string" ? input.trim().slice(0, 128) : "";
+  if (id && players[id]) return id;
+  return Object.keys(players)[0] || "";
+}
+
+function normalizeRemovedPlayers(input = {}) {
+  const removed = {};
+  if (!input || typeof input !== "object") return removed;
+
+  const values = Array.isArray(input) ? input : Object.values(input);
+  for (const player of values) {
+    const id = String(player?.id || player?.playerId || "").trim().slice(0, 128);
+    if (!id) continue;
+    removed[id] = {
+      id,
+      name: normalizePlayerName(player?.name),
+      removedAt: typeof player?.removedAt === "string" ? player.removedAt : ""
+    };
+  }
+
+  return removed;
+}
+
+function redactPlayerDataFromGame(state, playerId) {
+  for (const cell of Object.values(state.board)) {
+    if (cell.playerId !== playerId) continue;
+    cell.playerId = "";
+    cell.tileId = "";
+  }
+
+  for (const move of state.moves) {
+    if (move.playerId !== playerId) continue;
+    move.playerId = "";
+    move.playerName = "deleted player";
+    for (const placement of move.placements || []) {
+      placement.tileId = "";
+    }
+  }
 }
 
 function normalizeBoard(input = {}) {

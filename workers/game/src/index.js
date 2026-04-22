@@ -1,5 +1,12 @@
-import { GLOBAL_ROOM_ID, GameRuleError, RACK_SIZE, applyMove, createGameState, joinGame, normalizePlayerName, normalizeRoomId, normalizeWord, resetGameState } from "../../../app/model.js";
+import { GLOBAL_ROOM_ID, GameRuleError, RACK_SIZE, applyMove, createGameState, joinGame, normalizePlayerName, normalizeRoomId, normalizeWord, removePlayerFromGame as removePlayerFromGameState, resetGameState } from "../../../app/model.js";
 import { DICTIONARY_WORDS } from "./dictionary.generated.js";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_SYNC_CACHE_TTL_DAYS = 30;
+const GAME_STORAGE_KEY = "game";
+const CACHE_META_STORAGE_KEY = "cacheMeta";
+const INBOX_STORAGE_KEY = "inboxes";
+const USERS_STORAGE_KEY = "users";
 
 const MOVE_VALIDATION = {
   isWordAllowed: word => DICTIONARY_WORDS.has(normalizeWord(word))
@@ -11,19 +18,31 @@ export class GameRoom {
     this.env = env;
     this.game = null;
     this.hasStoredGame = false;
+    this.cacheExpiresAt = "";
     this.ready = this.initialize();
   }
 
   async initialize() {
-    const storedGame = await this.state.storage.get("game") || {};
+    const [storedGame, cacheMeta] = await Promise.all([
+      this.state.storage.get(GAME_STORAGE_KEY),
+      this.state.storage.get(CACHE_META_STORAGE_KEY)
+    ]);
+    this.cacheExpiresAt = validDateString(cacheMeta?.expiresAt) ? cacheMeta.expiresAt : "";
+    if (storedGame?.id && this.cacheExpiresAt && isExpired(this.cacheExpiresAt)) {
+      await this.purgeCache();
+      return;
+    }
+
     this.hasStoredGame = Boolean(storedGame?.id);
     this.game = createGameState(storedGame);
+    if (this.hasStoredGame && !this.cacheExpiresAt) await this.touchCache();
     if (hasOversizedRacks(storedGame)) await this.save();
   }
 
   async fetch(request) {
     await this.ready;
     const cors = corsHeaders(request, this.env);
+    const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: cors });
@@ -33,7 +52,14 @@ export class GameRoom {
       return json({ error: "Origin not allowed" }, 403, cors);
     }
 
-    const route = parseGameRoute(new URL(request.url).pathname);
+    await this.expireCacheIfNeeded();
+
+    const internalRemoveMatch = /^\/internal\/players\/([^/]+)\/?$/.exec(url.pathname);
+    if (internalRemoveMatch && (request.method === "DELETE" || request.method === "POST")) {
+      return await this.removePlayerInternal(decodeURIComponent(internalRemoveMatch[1]), cors);
+    }
+
+    const route = parseGameRoute(url.pathname);
     if (!route) return json({ error: "Not found" }, 404, cors);
 
     try {
@@ -53,17 +79,24 @@ export class GameRoom {
         return await this.reorderRack(request, route.roomId, cors);
       }
 
+      if (route.action === "remove-player" && request.method === "POST") {
+        return await this.removePlayer(request, route.roomId, cors);
+      }
+
       if (route.action === "state" && request.method === "GET") {
-        this.ensureRoom(route.roomId);
+        this.ensureStoredRoom(route.roomId);
+        await this.touchCache();
         return json({ state: this.game }, 200, cors);
       }
 
       if (route.action === "exists" && request.method === "GET") {
+        if (this.gameExists(route.roomId)) await this.touchCache();
         return json({ exists: this.gameExists(route.roomId) }, 200, cors);
       }
 
       if (route.action === "stream" && request.method === "GET") {
-        this.ensureRoom(route.roomId);
+        this.ensureStoredRoom(route.roomId);
+        await this.touchCache();
         return this.stream(request);
       }
 
@@ -89,7 +122,7 @@ export class GameRoom {
       invited.push(result.player);
     }
     await this.save();
-    await rememberGameMemberships(this.env, this.game, [joined.player, ...invited], invited, joined.player);
+    await rememberGameMemberships(this.env, this.game, Object.values(this.game.players), invited, joined.player);
     this.broadcast(null, { type: "state", state: this.game });
     return json({ state: this.game, player: joined.player, invited, created: joined.created }, 200, cors);
   }
@@ -138,6 +171,41 @@ export class GameRoom {
     await this.save();
     this.broadcast(null, { type: "state", state: this.game });
     return json({ state: this.game }, 200, cors);
+  }
+
+  async removePlayer(request, roomId, cors) {
+    this.ensureRoom(roomId);
+    const body = await readJson(request);
+    const ownerId = normalizePlayerId(body.ownerId || body.actorId);
+    if (!ownerId || ownerId !== this.game.ownerId) {
+      throw statusError("Only the board owner can remove players", 403);
+    }
+
+    const playerId = normalizePlayerId(body.playerId || body.targetPlayerId);
+    const result = removePlayerFromGameState(this.game, { playerId });
+    this.game = result.state;
+    await this.save();
+    await removeGameMembership(this.env, this.game.id, result.player.id);
+    this.broadcast(null, { type: "state", state: this.game, removedPlayer: result.player });
+    return json({ state: this.game, removedPlayer: result.player }, 200, cors);
+  }
+
+  async removePlayerInternal(playerIdInput, cors) {
+    const playerId = normalizePlayerId(playerIdInput);
+    if (!playerId) throw statusError("Player ID is required", 400);
+    if (!this.game?.players?.[playerId]) {
+      return json({ removed: false, playerId, gameId: this.game?.id || "" }, 200, cors);
+    }
+
+    const result = removePlayerFromGameState(this.game, {
+      playerId,
+      allowOwnerRemoval: true,
+      redactPlayerData: true
+    });
+    this.game = result.state;
+    await this.save();
+    this.broadcast(null, { type: "state", state: this.game, removedPlayer: result.player });
+    return json({ removed: true, playerId, gameId: this.game.id, state: this.game }, 200, cors);
   }
 
   stream(request) {
@@ -196,8 +264,9 @@ export class GameRoom {
   webSocketError() {}
 
   async save() {
-    await this.state.storage.put("game", this.game);
+    await this.state.storage.put(GAME_STORAGE_KEY, this.game);
     this.hasStoredGame = Boolean(this.game?.id);
+    if (this.hasStoredGame) await this.touchCache();
   }
 
   gameExists(roomId) {
@@ -205,17 +274,55 @@ export class GameRoom {
     return Boolean(this.hasStoredGame && normalized && this.game?.id === normalized);
   }
 
+  ensureStoredRoom(roomId) {
+    const normalized = normalizeRoomId(roomId);
+    if (!normalized) throw statusError("Board is required", 400);
+    if (!this.gameExists(normalized)) throw statusError("Board not found", 404);
+  }
+
   ensureRoom(roomId, options = {}) {
     const normalized = normalizeRoomId(roomId);
     if (!normalized) throw statusError("Board is required", 400);
     if (this.game.id && this.game.id !== normalized) throw statusError("Board mismatch", 409);
     if (!this.game.id) {
+      const seedState = createSeedGameState(options.state, normalized);
       this.game = createGameState({
-        ...this.game,
+        ...(seedState || this.game),
         id: normalized,
-        tileBagCount: options.tileBagCount || this.game.tileBagCount
+        tileBagCount: options.tileBagCount || seedState?.tileBagCount || this.game.tileBagCount
       });
     }
+  }
+
+  async touchCache() {
+    if (!this.hasStoredGame && !this.game?.id) return;
+    this.cacheExpiresAt = expiresAtFromNow(this.env);
+    await Promise.all([
+      this.state.storage.put(CACHE_META_STORAGE_KEY, { expiresAt: this.cacheExpiresAt }),
+      setStorageAlarm(this.state.storage, this.cacheExpiresAt)
+    ]);
+  }
+
+  async expireCacheIfNeeded(now = Date.now()) {
+    if (!this.hasStoredGame || !this.cacheExpiresAt || !isExpired(this.cacheExpiresAt, now)) return false;
+    await this.purgeCache();
+    return true;
+  }
+
+  async purgeCache() {
+    await Promise.all([
+      this.state.storage.delete(GAME_STORAGE_KEY),
+      this.state.storage.delete(CACHE_META_STORAGE_KEY),
+      deleteStorageAlarm(this.state.storage)
+    ]);
+    this.game = createGameState();
+    this.hasStoredGame = false;
+    this.cacheExpiresAt = "";
+  }
+
+  async alarm() {
+    await this.ready;
+    await this.expireCacheIfNeeded();
   }
 
   broadcast(sender, message) {
@@ -236,11 +343,22 @@ export class InviteInbox {
     this.state = state;
     this.env = env;
     this.inboxes = null;
+    this.users = null;
     this.ready = this.initialize();
   }
 
   async initialize() {
-    this.inboxes = await this.state.storage.get("inboxes") || {};
+    const [inboxes, users] = await Promise.all([
+      this.state.storage.get(INBOX_STORAGE_KEY),
+      this.state.storage.get(USERS_STORAGE_KEY)
+    ]);
+    this.inboxes = normalizeStoredInboxes(inboxes, this.env);
+    this.users = normalizeStoredUsers(users, this.inboxes);
+    await Promise.all([
+      this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
+      this.state.storage.put(USERS_STORAGE_KEY, this.users)
+    ]);
+    await this.sweepExpiredRefs();
   }
 
   async fetch(request) {
@@ -256,11 +374,22 @@ export class InviteInbox {
     }
 
     const url = new URL(request.url);
+    await this.sweepExpiredRefs();
 
     if ((url.pathname === "/internal/games" || url.pathname === "/internal/invite") && request.method === "POST") {
       const body = await readJson(request);
       await this.addGameRefs(body);
       return json({ ok: true }, 200, cors);
+    }
+
+    if (url.pathname === "/internal/admin/users" && request.method === "GET") {
+      return json({ users: this.listUsers() }, 200, cors);
+    }
+
+    const removeGameRefMatch = /^\/internal\/games\/([A-Za-z0-9]+)\/players\/([^/]+)\/?$/.exec(url.pathname);
+    if (removeGameRefMatch && (request.method === "DELETE" || request.method === "POST")) {
+      const result = await this.removeGameRef(removeGameRefMatch[1], decodeURIComponent(removeGameRefMatch[2]));
+      return json(result, 200, cors);
     }
 
     const route = parsePlayerRoute(url.pathname);
@@ -272,6 +401,11 @@ export class InviteInbox {
 
     if (route.action === "invites" && request.method === "GET") {
       return json({ invites: this.playerGames(route.playerId) }, 200, cors);
+    }
+
+    if (route.action === "delete" && (request.method === "DELETE" || request.method === "POST")) {
+      const body = await readJson(request).catch(() => ({}));
+      return json(await this.deletePlayer(route.playerId, body), 200, cors);
     }
 
     return json({ error: "Not found" }, 404, cors);
@@ -288,6 +422,7 @@ export class InviteInbox {
     const now = new Date().toISOString();
     const invitedAt = typeof input.invitedAt === "string" ? input.invitedAt : now;
     const updatedAt = typeof input.updatedAt === "string" ? input.updatedAt : now;
+    const expiresAt = expiresAtFromNow(this.env);
     const players = normalizeInvites(input.players || input.invites, 100);
     const invitedIds = new Set(normalizeInvites(input.invites).map(invite => invite.playerId));
 
@@ -298,21 +433,204 @@ export class InviteInbox {
         ...previous,
         gameId,
         updatedAt,
-        joinedAt: previous.joinedAt || updatedAt
+        joinedAt: previous.joinedAt || updatedAt,
+        expiresAt
       };
 
       if (invitedIds.has(player.playerId)) {
         this.inboxes[player.playerId][gameId].invitedAt = invitedAt;
         this.inboxes[player.playerId][gameId].invitedBy = inviter;
       }
+
+      this.rememberUser(player, gameId, this.inboxes[player.playerId][gameId].joinedAt, updatedAt);
     }
 
-    await this.state.storage.put("inboxes", this.inboxes);
+    await Promise.all([
+      this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
+      this.state.storage.put(USERS_STORAGE_KEY, this.users),
+      this.scheduleAlarm()
+    ]);
   }
 
   playerGames(playerId) {
-    const inbox = this.inboxes[String(playerId || "").trim().slice(0, 128)] || {};
+    const inbox = this.inboxes[normalizePlayerId(playerId)] || {};
     return Object.values(inbox).sort((left, right) => Date.parse(right.updatedAt || right.invitedAt || "") - Date.parse(left.updatedAt || left.invitedAt || ""));
+  }
+
+  rememberUser(player, gameId, createdAt, updatedAt) {
+    const id = normalizePlayerId(player?.playerId || player?.id);
+    if (!id) return;
+
+    const previous = this.users[id] || {};
+    const gameIds = new Set([
+      ...normalizeGameIds(previous.gameIds),
+      ...gameIdsFromInbox(this.inboxes[id]),
+      gameId
+    ].filter(Boolean));
+    const now = new Date().toISOString();
+    this.users[id] = {
+      id,
+      name: normalizePlayerName(player?.name) || previous.name || "Player",
+      createdAt: validDateString(previous.createdAt) ? previous.createdAt : validDateString(createdAt) ? createdAt : now,
+      updatedAt: validDateString(updatedAt) ? updatedAt : now,
+      gameIds: [...gameIds].sort()
+    };
+  }
+
+  listUsers() {
+    const ids = new Set([...Object.keys(this.users || {}), ...Object.keys(this.inboxes || {})]);
+    return [...ids]
+      .map(id => this.userSummary(id))
+      .filter(Boolean)
+      .sort(compareAdminUsers);
+  }
+
+  userSummary(playerId) {
+    const id = normalizePlayerId(playerId);
+    if (!id) return null;
+
+    const user = this.users[id] || {};
+    const inbox = this.inboxes[id] || {};
+    const gameIds = [...new Set([
+      ...normalizeGameIds(user.gameIds),
+      ...gameIdsFromInbox(inbox)
+    ])].sort();
+    const createdAt = validDateString(user.createdAt) ? user.createdAt : firstMembershipAt(inbox);
+    const updatedAt = validDateString(user.updatedAt) ? user.updatedAt : lastMembershipAt(inbox) || createdAt;
+
+    return {
+      id,
+      name: normalizePlayerName(user.name),
+      signupAt: createdAt || "",
+      createdAt: createdAt || "",
+      updatedAt: updatedAt || "",
+      gameCount: gameIds.length,
+      gameIds
+    };
+  }
+
+  async removeGameRef(gameIdInput, playerIdInput) {
+    const gameId = normalizeRoomId(gameIdInput);
+    const playerId = normalizePlayerId(playerIdInput);
+    if (!gameId) throw statusError("Board is required", 400);
+    if (!playerId) throw statusError("Player ID is required", 400);
+
+    const inbox = this.inboxes[playerId] || {};
+    const removed = Boolean(inbox[gameId]);
+    delete inbox[gameId];
+    if (Object.keys(inbox).length) {
+      this.inboxes[playerId] = inbox;
+    } else {
+      delete this.inboxes[playerId];
+    }
+
+    if (this.users[playerId]) {
+      this.users[playerId] = {
+        ...this.users[playerId],
+        gameIds: normalizeGameIds(this.users[playerId].gameIds).filter(id => id !== gameId)
+      };
+    }
+
+    await Promise.all([
+      this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
+      this.state.storage.put(USERS_STORAGE_KEY, this.users),
+      this.scheduleAlarm()
+    ]);
+
+    return { removed, gameId, playerId };
+  }
+
+  async deletePlayer(playerIdInput, input = {}) {
+    const playerId = normalizePlayerId(playerIdInput);
+    if (!playerId) throw statusError("Player ID is required", 400);
+
+    const user = this.userSummary(playerId);
+    const gameIds = [...new Set([
+      ...(user?.gameIds || []),
+      ...normalizeGameIds(input.gameIds)
+    ])].sort();
+    const games = [];
+
+    for (const gameId of gameIds) {
+      games.push(await removePlayerFromGame(this.env, gameId, playerId));
+    }
+
+    const failed = games.filter(game => game.ok === false || game.error);
+    if (failed.length) throw statusError("Failed to remove player from one or more boards", 502);
+
+    delete this.inboxes[playerId];
+    delete this.users[playerId];
+
+    await Promise.all([
+      this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
+      this.state.storage.put(USERS_STORAGE_KEY, this.users),
+      this.scheduleAlarm()
+    ]);
+
+    return {
+      deleted: true,
+      playerId,
+      user,
+      gameCount: gameIds.length,
+      games
+    };
+  }
+
+  async sweepExpiredRefs(now = Date.now()) {
+    let changed = false;
+
+    for (const [playerId, inbox] of Object.entries(this.inboxes || {})) {
+      for (const [gameId, ref] of Object.entries(inbox || {})) {
+        if (isExpired(ref?.expiresAt, now)) {
+          delete inbox[gameId];
+          changed = true;
+        }
+      }
+
+      if (!Object.keys(inbox).length) {
+        delete this.inboxes[playerId];
+        changed = true;
+      }
+    }
+
+    for (const [playerId, record] of Object.entries(this.users || {})) {
+      const gameIds = gameIdsFromInbox(this.inboxes[playerId]);
+      if (!gameIds.length) {
+        delete this.users[playerId];
+        changed = true;
+        continue;
+      }
+
+      const previous = normalizeGameIds(record.gameIds);
+      if (!sameStringSet(previous, gameIds)) {
+        this.users[playerId] = { ...record, gameIds };
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      await Promise.all([
+        this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
+        this.state.storage.put(USERS_STORAGE_KEY, this.users)
+      ]);
+    }
+
+    await this.scheduleAlarm();
+    return changed;
+  }
+
+  async scheduleAlarm() {
+    const next = nextInboxExpiry(this.inboxes);
+    if (next) {
+      await setStorageAlarm(this.state.storage, next);
+    } else {
+      await deleteStorageAlarm(this.state.storage);
+    }
+  }
+
+  async alarm() {
+    await this.ready;
+    await this.sweepExpiredRefs();
   }
 }
 
@@ -328,6 +646,11 @@ export default {
     }
 
     const pathname = new URL(request.url).pathname;
+    const adminRoute = parseAdminRoute(pathname);
+    if (adminRoute) {
+      return await handleAdminRequest(request, env, adminRoute, cors);
+    }
+
     const playerRoute = parsePlayerRoute(pathname);
     if (playerRoute) {
       const id = env.INVITE_INBOX.idFromName("invites");
@@ -345,7 +668,7 @@ export default {
 };
 
 export function parseGameRoute(pathname) {
-  const globalMatch = /^\/game\/(exists|join|move|rack|reset|state|stream)\/?$/.exec(pathname);
+  const globalMatch = /^\/game\/(exists|join|move|rack|remove-player|reset|state|stream)\/?$/.exec(pathname);
   if (globalMatch) {
     return {
       roomId: GLOBAL_ROOM_ID,
@@ -353,7 +676,7 @@ export function parseGameRoute(pathname) {
     };
   }
 
-  const match = /^\/game\/([A-Za-z0-9]+)\/(exists|join|move|rack|reset|state|stream)\/?$/.exec(pathname);
+  const match = /^\/game\/([A-Za-z0-9]+)\/(exists|join|move|rack|remove-player|reset|state|stream)\/?$/.exec(pathname);
   if (!match) return null;
   return {
     roomId: normalizeRoomId(match[1]),
@@ -362,12 +685,17 @@ export function parseGameRoute(pathname) {
 }
 
 export function parsePlayerRoute(pathname) {
-  const match = /^\/player\/([^/]+)\/(games|invites)\/?$/.exec(pathname);
+  const match = /^\/player\/([^/]+)\/(delete|games|invites)\/?$/.exec(pathname);
   if (!match) return null;
   return {
-    playerId: decodeURIComponent(match[1]).trim().slice(0, 128),
+    playerId: normalizePlayerId(decodeURIComponent(match[1])),
     action: match[2]
   };
+}
+
+export function parseAdminRoute(pathname) {
+  if (/^\/admin\/users\/?$/.test(pathname)) return { action: "users" };
+  return null;
 }
 
 async function readJson(request) {
@@ -383,8 +711,8 @@ function corsHeaders(request, env) {
   const allowed = allowedOrigins(env);
   const allowOrigin = origin && (allowed.includes("*") || allowed.includes(origin)) ? origin : "";
   const headers = {
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Token",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin"
   };
@@ -418,13 +746,17 @@ function hasOversizedRacks(game) {
   return Object.values(game?.players || {}).some(player => Array.isArray(player?.rack) && player.rack.length > RACK_SIZE);
 }
 
+function normalizePlayerId(value) {
+  return String(value || "").trim().slice(0, 128);
+}
+
 function normalizeInvites(input = [], limit = 20) {
   if (!Array.isArray(input)) return [];
   const seen = new Set();
   const invites = [];
 
   for (const item of input) {
-    const playerId = String(item?.playerId || item?.id || "").trim().slice(0, 128);
+    const playerId = normalizePlayerId(item?.playerId || item?.id);
     if (!playerId || seen.has(playerId)) continue;
     seen.add(playerId);
     invites.push({
@@ -435,6 +767,239 @@ function normalizeInvites(input = [], limit = 20) {
   }
 
   return invites;
+}
+
+function createSeedGameState(input, roomId) {
+  if (!input || typeof input !== "object") return null;
+  const state = createGameState({ ...input, id: roomId });
+  if (!Object.keys(state.players).length && !Object.keys(state.board).length && !state.moves.length) return null;
+  return state;
+}
+
+async function handleAdminRequest(request, env, route, cors) {
+  const authError = requireAdmin(request, env, cors);
+  if (authError) return authError;
+  if (!env.INVITE_INBOX) return json({ error: "Invite inbox binding is unavailable" }, 500, cors);
+
+  const id = env.INVITE_INBOX.idFromName("invites");
+  const inbox = env.INVITE_INBOX.get(id);
+
+  if (route.action === "users" && request.method === "GET") {
+    const response = await inbox.fetch("https://invite-inbox/internal/admin/users", { method: "GET" });
+    return await relayJsonResponse(response, cors);
+  }
+
+  return json({ error: "Not found" }, 404, cors);
+}
+
+function requireAdmin(request, env, cors) {
+  const expected = normalizeAdminToken(env?.ADMIN_TOKEN);
+  if (!expected) return json({ error: "Admin token is not configured" }, 503, cors);
+
+  const actual = normalizeAdminToken(adminTokenFromRequest(request));
+  if (!actual || actual !== expected) return json({ error: "Unauthorized" }, 401, cors);
+  return null;
+}
+
+function adminTokenFromRequest(request) {
+  const header = request.headers.get("Authorization") || "";
+  const bearer = /^Bearer\s+(.+)$/i.exec(header);
+  if (bearer) return bearer[1];
+  return request.headers.get("X-Admin-Token") || "";
+}
+
+function normalizeAdminToken(value) {
+  return String(value || "").trim();
+}
+
+function syncCacheTtlMs(env = {}) {
+  const configuredMs = Number.parseInt(env.SYNC_CACHE_TTL_MS, 10);
+  if (Number.isFinite(configuredMs) && configuredMs > 0) return configuredMs;
+
+  const configuredDays = Number.parseFloat(env.SYNC_CACHE_TTL_DAYS);
+  if (Number.isFinite(configuredDays) && configuredDays > 0) return Math.round(configuredDays * DAY_MS);
+
+  return DEFAULT_SYNC_CACHE_TTL_DAYS * DAY_MS;
+}
+
+function expiresAtFromNow(env = {}, now = Date.now()) {
+  return new Date(now + syncCacheTtlMs(env)).toISOString();
+}
+
+function isExpired(value, now = Date.now()) {
+  return validDateString(value) && Date.parse(value) <= now;
+}
+
+async function setStorageAlarm(storage, expiresAt) {
+  if (typeof storage?.setAlarm !== "function") return;
+  const timestamp = Date.parse(expiresAt);
+  if (!Number.isFinite(timestamp)) return;
+  await storage.setAlarm(timestamp);
+}
+
+async function deleteStorageAlarm(storage) {
+  if (typeof storage?.deleteAlarm !== "function") return;
+  await storage.deleteAlarm();
+}
+
+async function relayJsonResponse(response, cors) {
+  const body = await response.text();
+  return new Response(body, {
+    status: response.status,
+    headers: {
+      "Content-Type": response.headers.get("Content-Type") || "application/json",
+      ...cors
+    }
+  });
+}
+
+function normalizeStoredInboxes(input = {}, env = {}) {
+  const inboxes = {};
+  if (!input || typeof input !== "object") return inboxes;
+
+  const fallbackExpiresAt = expiresAtFromNow(env);
+  for (const [rawPlayerId, rawInbox] of Object.entries(input)) {
+    const playerId = normalizePlayerId(rawPlayerId);
+    if (!playerId || !rawInbox || typeof rawInbox !== "object") continue;
+
+    for (const [rawGameId, rawRef] of Object.entries(rawInbox)) {
+      const gameId = normalizeRoomId(rawRef?.gameId || rawGameId);
+      if (!gameId || !rawRef || typeof rawRef !== "object") continue;
+      inboxes[playerId] ||= {};
+      inboxes[playerId][gameId] = {
+        ...rawRef,
+        gameId,
+        updatedAt: validDateString(rawRef.updatedAt) ? rawRef.updatedAt : new Date().toISOString(),
+        joinedAt: validDateString(rawRef.joinedAt) ? rawRef.joinedAt : validDateString(rawRef.updatedAt) ? rawRef.updatedAt : "",
+        expiresAt: validDateString(rawRef.expiresAt) ? rawRef.expiresAt : fallbackExpiresAt
+      };
+    }
+  }
+
+  return inboxes;
+}
+
+async function removePlayerFromGame(env, gameId, playerId) {
+  const normalizedGameId = normalizeRoomId(gameId);
+  const normalizedPlayerId = normalizePlayerId(playerId);
+  if (!normalizedGameId || !normalizedPlayerId) {
+    return { gameId: normalizedGameId, playerId: normalizedPlayerId, removed: false, ok: false, error: "Board and player are required" };
+  }
+
+  if (!env.GAME_ROOM) {
+    return { gameId: normalizedGameId, playerId: normalizedPlayerId, removed: false, ok: false, error: "Game room binding is unavailable" };
+  }
+
+  try {
+    const id = env.GAME_ROOM.idFromName(normalizedGameId);
+    const room = env.GAME_ROOM.get(id);
+    const response = await room.fetch(`https://game-room/internal/players/${encodeURIComponent(normalizedPlayerId)}`, {
+      method: "DELETE"
+    });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    return {
+      gameId: normalizedGameId,
+      playerId: normalizedPlayerId,
+      removed: Boolean(payload.removed),
+      ok: response.ok,
+      status: response.status
+    };
+  } catch (error) {
+    return { gameId: normalizedGameId, playerId: normalizedPlayerId, removed: false, ok: false, error: messageFromError(error) };
+  }
+}
+
+function normalizeStoredUsers(input = {}, inboxes = {}) {
+  const users = {};
+  if (input && typeof input === "object") {
+    for (const [key, value] of Object.entries(input)) {
+      const id = normalizePlayerId(value?.id || key);
+      if (!id) continue;
+      const inbox = inboxes[id] || {};
+      const createdAt = validDateString(value?.createdAt) ? value.createdAt : firstMembershipAt(inbox);
+      const updatedAt = validDateString(value?.updatedAt) ? value.updatedAt : lastMembershipAt(inbox) || createdAt;
+      users[id] = {
+        id,
+        name: normalizePlayerName(value?.name),
+        createdAt: createdAt || "",
+        updatedAt: updatedAt || "",
+        gameIds: [...new Set([
+          ...normalizeGameIds(value?.gameIds),
+          ...gameIdsFromInbox(inbox)
+        ])].sort()
+      };
+    }
+  }
+
+  for (const [playerId, inbox] of Object.entries(inboxes || {})) {
+    const id = normalizePlayerId(playerId);
+    if (!id || users[id]) continue;
+    const createdAt = firstMembershipAt(inbox);
+    users[id] = {
+      id,
+      name: "",
+      createdAt: createdAt || "",
+      updatedAt: lastMembershipAt(inbox) || createdAt || "",
+      gameIds: gameIdsFromInbox(inbox)
+    };
+  }
+
+  return users;
+}
+
+function normalizeGameIds(input = []) {
+  if (!Array.isArray(input)) return [];
+  return input.map(normalizeRoomId).filter(Boolean);
+}
+
+function gameIdsFromInbox(inbox = {}) {
+  if (!inbox || typeof inbox !== "object") return [];
+  return Object.keys(inbox).map(normalizeRoomId).filter(Boolean).sort();
+}
+
+function nextInboxExpiry(inboxes = {}) {
+  let next = Infinity;
+  for (const inbox of Object.values(inboxes || {})) {
+    for (const ref of Object.values(inbox || {})) {
+      const timestamp = Date.parse(ref?.expiresAt || "");
+      if (Number.isFinite(timestamp) && timestamp < next) next = timestamp;
+    }
+  }
+  return Number.isFinite(next) ? new Date(next).toISOString() : "";
+}
+
+function firstMembershipAt(inbox = {}) {
+  return membershipDates(inbox)[0] || "";
+}
+
+function lastMembershipAt(inbox = {}) {
+  const dates = membershipDates(inbox);
+  return dates[dates.length - 1] || "";
+}
+
+function membershipDates(inbox = {}) {
+  if (!inbox || typeof inbox !== "object") return [];
+  return Object.values(inbox)
+    .flatMap(ref => [ref?.joinedAt, ref?.invitedAt, ref?.updatedAt])
+    .filter(validDateString)
+    .sort((left, right) => Date.parse(left) - Date.parse(right));
+}
+
+function validDateString(value) {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function compareAdminUsers(left, right) {
+  const leftTime = Date.parse(left.signupAt || left.createdAt || "");
+  const rightTime = Date.parse(right.signupAt || right.createdAt || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return rightTime - leftTime;
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(rightTime) ? 1 : -1;
+  return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
 }
 
 async function rememberGameMemberships(env, game, players, invites = [], invitedBy = null) {
@@ -454,6 +1019,22 @@ async function rememberGameMemberships(env, game, players, invites = [], invited
         invitedAt: new Date().toISOString(),
         updatedAt: game.updatedAt
       })
+    });
+  } catch {
+    // Game state is still authoritative if the membership relay is temporarily unavailable.
+  }
+}
+
+async function removeGameMembership(env, gameId, playerId) {
+  const normalizedGameId = normalizeRoomId(gameId);
+  const normalizedPlayerId = normalizePlayerId(playerId);
+  if (!env.INVITE_INBOX || !normalizedGameId || !normalizedPlayerId) return;
+
+  try {
+    const id = env.INVITE_INBOX.idFromName("invites");
+    const inbox = env.INVITE_INBOX.get(id);
+    await inbox.fetch(`https://invite-inbox/internal/games/${encodeURIComponent(normalizedGameId)}/players/${encodeURIComponent(normalizedPlayerId)}`, {
+      method: "DELETE"
     });
   } catch {
     // Game state is still authoritative if the membership relay is temporarily unavailable.

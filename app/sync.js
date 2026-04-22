@@ -188,11 +188,14 @@ export class GameSync {
   }
 }
 
-export async function joinRemoteGame({ roomId = GLOBAL_ROOM_ID, playerId, name, tileBagCount, invites = [] }, settings = loadSettings()) {
+export async function joinRemoteGame({ roomId = GLOBAL_ROOM_ID, playerId, name, tileBagCount, invites = [], state = null }, settings = loadSettings()) {
+  const body = { playerId, name, tileBagCount, invites };
+  if (state) body.state = createGameState(state);
+
   const response = await fetch(getGameEndpoint(settings.apiBaseUrl, roomId, "/join"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ playerId, name, tileBagCount, invites })
+    body: JSON.stringify(body)
   });
 
   if (!response.ok) throw await responseError(response);
@@ -216,6 +219,33 @@ export async function fetchRemoteGameState(roomId, settings = loadSettings()) {
   if (!response.ok) throw await responseError(response);
   const payload = await response.json();
   return createGameState(payload.state || payload.game || payload);
+}
+
+export async function removeRemotePlayer({ roomId = GLOBAL_ROOM_ID, ownerId, playerId }, settings = loadSettings()) {
+  const response = await fetch(getGameEndpoint(settings.apiBaseUrl, roomId, "/remove-player"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ownerId, playerId })
+  });
+
+  if (!response.ok) throw await responseError(response);
+  const payload = await response.json();
+  return {
+    ...payload,
+    state: createGameState(payload.state)
+  };
+}
+
+export async function deleteRemoteAccount({ playerId, gameIds = [] }, settings = loadSettings()) {
+  if (!settings.apiBaseUrl || !playerId) return { deleted: false, playerId, gameCount: 0, games: [] };
+  const response = await fetch(getPlayerEndpoint(settings.apiBaseUrl, playerId, "/delete"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ gameIds })
+  });
+
+  if (!response.ok) throw await responseError(response);
+  return await response.json();
 }
 
 export async function fetchPlayerGameRefs(playerId, settings = loadSettings()) {

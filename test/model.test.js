@@ -12,6 +12,7 @@ import {
   joinGame,
   placementAxis,
   playerTilesLeft,
+  removePlayerFromGame,
   resetGameState,
   validateMove
 } from "../app/model.js";
@@ -183,6 +184,62 @@ test("game is complete when every joined player has used all tiles", () => {
 
   const rejoined = joinGame(game, { playerId: "p1", name: "Ada" });
   assert.equal(rejoined.created, false);
+});
+
+test("game owner can remove another player while played words stay", () => {
+  const game = gameWithPlayers();
+  game.board = {
+    "0,0": { q: 0, r: 0, letter: "B", value: 3, playerId: "p2", tileId: "b", timestamp: 1 }
+  };
+  game.moves = [{
+    id: "move-1",
+    playerId: "p2",
+    playerName: "Ben",
+    placements: [{ q: 0, r: 0, tileId: "b" }],
+    timestamp: 1,
+    score: 3,
+    words: [{ text: "B", keys: ["0,0"] }]
+  }];
+
+  assert.equal(game.ownerId, "p1");
+  const { state, player } = removePlayerFromGame(game, { playerId: "p2" });
+
+  assert.equal(player.name, "Ben");
+  assert.equal(state.players.p2, undefined);
+  assert.equal(state.board["0,0"].playerId, "p2");
+  assert.equal(state.moves[0].playerId, "p2");
+  assert.equal(state.removedPlayers.p2.name, "Ben");
+  assert.throws(() => joinGame(state, { playerId: "p2", name: "Ben" }), /removed/);
+  assert.throws(() => removePlayerFromGame(state, { playerId: "p1" }), /owner/);
+});
+
+test("account deletion can remove an owner and transfer ownership", () => {
+  const game = gameWithPlayers();
+  game.board = {
+    "0,0": { q: 0, r: 0, letter: "A", value: 1, playerId: "p1", tileId: "a", timestamp: 1 }
+  };
+  game.moves = [{
+    id: "move-1",
+    playerId: "p1",
+    playerName: "Ada",
+    placements: [{ q: 0, r: 0, tileId: "a" }],
+    timestamp: 1,
+    score: 1,
+    words: [{ text: "A", keys: ["0,0"] }]
+  }];
+
+  const { state } = removePlayerFromGame(game, {
+    playerId: "p1",
+    allowOwnerRemoval: true,
+    redactPlayerData: true
+  });
+
+  assert.equal(state.players.p1, undefined);
+  assert.equal(state.ownerId, "p2");
+  assert.equal(state.removedPlayers.p1.name, "");
+  assert.equal(state.board["0,0"].letter, "A");
+  assert.equal(state.board["0,0"].playerId, "");
+  assert.equal(state.moves[0].playerName, "deleted player");
 });
 
 test("createPlayer returns overflow rack tiles to the bag", () => {

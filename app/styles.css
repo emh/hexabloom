@@ -314,6 +314,35 @@ body.no-scroll {
   color: var(--ink);
 }
 
+.confirmation-strip {
+  position: fixed;
+  z-index: 340;
+  bottom: calc(112px + env(safe-area-inset-bottom, 0));
+  align-items: center;
+  pointer-events: auto;
+}
+
+.confirmation-strip .confirmation-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-mid);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.confirmation-strip .confirmation-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.confirmation-strip .action-link {
+  padding: 0;
+  font-size: 10px;
+}
+
 .tray-panel {
   position: relative;
   z-index: 5;
@@ -470,6 +499,14 @@ body.no-scroll {
 
 .action-link.muted:hover {
   color: var(--blue-hover);
+}
+
+.action-link.danger {
+  color: var(--red);
+}
+
+.action-link.danger:hover {
+  color: var(--red-light);
 }
 
 .tray-actions .action-link {
@@ -893,8 +930,8 @@ body.no-scroll {
 
 .leaderboard-row {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) 68px 68px 68px;
-  gap: 12px;
+  grid-template-columns: 28px minmax(0, 1fr) 52px 52px 52px 64px;
+  gap: 10px;
   align-items: baseline;
   padding: 11px 0;
   border-bottom: 1px solid var(--rule);
@@ -916,6 +953,36 @@ body.no-scroll {
   line-height: 1.15;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.leaderboard-player-name {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.leaderboard-player-name span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 21px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leaderboard-player-name small {
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.leaderboard-remove {
+  padding: 0;
+  font-size: 10px;
 }
 
 .leaderboard-heading {
@@ -1031,6 +1098,10 @@ body.no-scroll {
 
 .link-device-form {
   margin-top: 22px;
+}
+
+.account-delete-row {
+  margin-top: 28px;
 }
 
 .setup-input {
@@ -1177,6 +1248,14 @@ body.no-scroll {
     left: 14px;
   }
 
+  .confirmation-strip {
+    bottom: calc(112px + env(safe-area-inset-bottom, 0));
+  }
+
+  .confirmation-strip .confirmation-detail {
+    display: none;
+  }
+
   .tray-panel {
     padding-right: 14px;
     padding-left: 14px;
@@ -1190,6 +1269,23 @@ body.no-scroll {
 
   .rack-tile span {
     font-size: 24px;
+  }
+
+  .leaderboard-row {
+    grid-template-columns: 22px minmax(0, 1fr) 36px 42px 34px 48px;
+    gap: 8px;
+  }
+
+  .leaderboard-player-name {
+    gap: 6px;
+  }
+
+  .leaderboard-player-name span {
+    font-size: 18px;
+  }
+
+  .leaderboard-remove {
+    font-size: 9px;
   }
 
   .history-row {
