@@ -562,6 +562,10 @@ body.no-scroll {
   z-index: 120;
 }
 
+.invite-overlay {
+  z-index: 125;
+}
+
 .leaderboard-overlay,
 .history-overlay {
   z-index: 130;
@@ -573,6 +577,7 @@ body.no-scroll {
   transition: transform 0.35s var(--ease), visibility 0s linear 0s;
 }
 
+.invite-overlay,
 .leaderboard-overlay,
 .history-overlay {
   background: transparent;
@@ -588,6 +593,7 @@ body.no-scroll {
   max-width: 860px;
 }
 
+.invite-content,
 .leaderboard-content,
 .history-content {
   width: min(640px, calc(100% - 36px));
@@ -602,6 +608,13 @@ body.no-scroll {
 
 .history-content {
   width: min(860px, calc(100% - 36px));
+}
+
+.invite-link-actions {
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  padding-bottom: 8px;
 }
 
 .setup-content h1 {
@@ -743,27 +756,11 @@ body.no-scroll {
   background: var(--hover);
 }
 
-.game-share-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 18px;
-  align-items: baseline;
-  padding-bottom: 14px;
-}
-
-.game-share-link {
-  min-width: 0;
-  border: none;
-  background: transparent;
-  color: var(--ink-faint);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  letter-spacing: 0;
-}
-
-.game-share-actions {
+.game-card-actions {
   display: flex;
+  align-items: baseline;
   gap: 16px;
+  padding-bottom: 14px;
 }
 
 .game-row-main,
@@ -1175,35 +1172,6 @@ body.no-scroll {
   transform: translateX(-50%);
 }
 
-.toast {
-  position: fixed;
-  z-index: 300;
-  right: 18px;
-  bottom: calc(112px + env(safe-area-inset-bottom, 0));
-  left: 18px;
-  width: fit-content;
-  max-width: min(640px, calc(100vw - 36px));
-  margin: 0 auto;
-  padding: 10px 14px;
-  border: 1px solid rgba(17, 17, 17, 0.24);
-  border-radius: 8px;
-  background: var(--paper-bright);
-  box-shadow: 0 8px 24px rgba(17, 17, 17, 0.12);
-  color: var(--ink-mid);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  letter-spacing: 0;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(8px);
-  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
-}
-
-.toast.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 @media (max-width: 520px) {
   .hud {
     padding-right: 14px;
@@ -1226,11 +1194,6 @@ body.no-scroll {
   .game-row {
     grid-template-columns: 1fr;
     gap: 8px;
-  }
-
-  .game-share-row {
-    grid-template-columns: 1fr;
-    gap: 6px;
   }
 
   .game-row-meta {

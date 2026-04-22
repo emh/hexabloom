@@ -83,6 +83,14 @@ export class GameRoom {
         return await this.removePlayer(request, route.roomId, cors);
       }
 
+      if (route.action === "resign" && request.method === "POST") {
+        return await this.resign(request, route.roomId, cors);
+      }
+
+      if (route.action === "delete" && request.method === "POST") {
+        return await this.deleteGame(request, route.roomId, cors);
+      }
+
       if (route.action === "state" && request.method === "GET") {
         this.ensureStoredRoom(route.roomId);
         await this.touchCache();
@@ -202,10 +210,56 @@ export class GameRoom {
       allowOwnerRemoval: true,
       redactPlayerData: true
     });
+    const gameId = this.game.id;
     this.game = result.state;
+    if (!Object.keys(this.game.players || {}).length) {
+      await this.purgeCache();
+      this.broadcast(null, { type: "deleted", gameId });
+      return json({ removed: true, deleted: true, playerId, gameId }, 200, cors);
+    }
+
     await this.save();
     this.broadcast(null, { type: "state", state: this.game, removedPlayer: result.player });
     return json({ removed: true, playerId, gameId: this.game.id, state: this.game }, 200, cors);
+  }
+
+  async resign(request, roomId, cors) {
+    this.ensureStoredRoom(roomId);
+    const body = await readJson(request);
+    const playerId = normalizePlayerId(body.playerId);
+    if (!playerId) throw statusError("Player ID is required", 400);
+    if (!this.game.players[playerId]) throw statusError("Player is not in this board", 404);
+
+    const result = removePlayerFromGameState(this.game, { playerId, allowOwnerRemoval: true });
+    const gameId = this.game.id;
+    this.game = result.state;
+
+    if (!Object.keys(this.game.players || {}).length) {
+      await this.purgeCache();
+      await removeGameMemberships(this.env, gameId);
+      this.broadcast(null, { type: "deleted", gameId });
+      return json({ resigned: true, deleted: true, gameId, removedPlayer: result.player }, 200, cors);
+    }
+
+    await this.save();
+    await removeGameMembership(this.env, gameId, result.player.id);
+    this.broadcast(null, { type: "state", state: this.game, removedPlayer: result.player });
+    return json({ resigned: true, deleted: false, gameId, state: this.game, removedPlayer: result.player }, 200, cors);
+  }
+
+  async deleteGame(request, roomId, cors) {
+    this.ensureStoredRoom(roomId);
+    const body = await readJson(request);
+    const ownerId = normalizePlayerId(body.ownerId || body.actorId);
+    if (!ownerId || ownerId !== this.game.ownerId) {
+      throw statusError("Only the board owner can delete this game", 403);
+    }
+
+    const gameId = this.game.id;
+    await this.purgeCache();
+    await removeGameMemberships(this.env, gameId);
+    this.broadcast(null, { type: "deleted", gameId });
+    return json({ deleted: true, gameId }, 200, cors);
   }
 
   stream(request) {
@@ -392,6 +446,12 @@ export class InviteInbox {
       return json(result, 200, cors);
     }
 
+    const removeGameRefsMatch = /^\/internal\/games\/([A-Za-z0-9]+)\/?$/.exec(url.pathname);
+    if (removeGameRefsMatch && (request.method === "DELETE" || request.method === "POST")) {
+      const result = await this.removeGameRefs(removeGameRefsMatch[1]);
+      return json(result, 200, cors);
+    }
+
     const route = parsePlayerRoute(url.pathname);
     if (!route) return json({ error: "Not found" }, 404, cors);
 
@@ -540,6 +600,42 @@ export class InviteInbox {
     return { removed, gameId, playerId };
   }
 
+  async removeGameRefs(gameIdInput) {
+    const gameId = normalizeRoomId(gameIdInput);
+    if (!gameId) throw statusError("Board is required", 400);
+
+    let removed = 0;
+    for (const [playerId, inbox] of Object.entries(this.inboxes || {})) {
+      if (inbox[gameId]) {
+        delete inbox[gameId];
+        removed += 1;
+      }
+
+      if (Object.keys(inbox).length) {
+        this.inboxes[playerId] = inbox;
+      } else {
+        delete this.inboxes[playerId];
+        delete this.users[playerId];
+      }
+    }
+
+    for (const [playerId, record] of Object.entries(this.users || {})) {
+      this.users[playerId] = {
+        ...record,
+        gameIds: normalizeGameIds(record.gameIds).filter(id => id !== gameId)
+      };
+      if (!this.users[playerId].gameIds.length) delete this.users[playerId];
+    }
+
+    await Promise.all([
+      this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
+      this.state.storage.put(USERS_STORAGE_KEY, this.users),
+      this.scheduleAlarm()
+    ]);
+
+    return { removed, gameId };
+  }
+
   async deletePlayer(playerIdInput, input = {}) {
     const playerId = normalizePlayerId(playerIdInput);
     if (!playerId) throw statusError("Player ID is required", 400);
@@ -668,7 +764,7 @@ export default {
 };
 
 export function parseGameRoute(pathname) {
-  const globalMatch = /^\/game\/(exists|join|move|rack|remove-player|reset|state|stream)\/?$/.exec(pathname);
+  const globalMatch = /^\/game\/(delete|exists|join|move|rack|remove-player|resign|reset|state|stream)\/?$/.exec(pathname);
   if (globalMatch) {
     return {
       roomId: GLOBAL_ROOM_ID,
@@ -676,7 +772,7 @@ export function parseGameRoute(pathname) {
     };
   }
 
-  const match = /^\/game\/([A-Za-z0-9]+)\/(exists|join|move|rack|remove-player|reset|state|stream)\/?$/.exec(pathname);
+  const match = /^\/game\/([A-Za-z0-9]+)\/(delete|exists|join|move|rack|remove-player|resign|reset|state|stream)\/?$/.exec(pathname);
   if (!match) return null;
   return {
     roomId: normalizeRoomId(match[1]),
@@ -1034,6 +1130,21 @@ async function removeGameMembership(env, gameId, playerId) {
     const id = env.INVITE_INBOX.idFromName("invites");
     const inbox = env.INVITE_INBOX.get(id);
     await inbox.fetch(`https://invite-inbox/internal/games/${encodeURIComponent(normalizedGameId)}/players/${encodeURIComponent(normalizedPlayerId)}`, {
+      method: "DELETE"
+    });
+  } catch {
+    // Game state is still authoritative if the membership relay is temporarily unavailable.
+  }
+}
+
+async function removeGameMemberships(env, gameId) {
+  const normalizedGameId = normalizeRoomId(gameId);
+  if (!env.INVITE_INBOX || !normalizedGameId) return;
+
+  try {
+    const id = env.INVITE_INBOX.idFromName("invites");
+    const inbox = env.INVITE_INBOX.get(id);
+    await inbox.fetch(`https://invite-inbox/internal/games/${encodeURIComponent(normalizedGameId)}`, {
       method: "DELETE"
     });
   } catch {

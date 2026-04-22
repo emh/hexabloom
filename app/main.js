@@ -22,7 +22,7 @@ import {
   validateMove
 } from "./model.js";
 import { createInitialState, loadAppState, saveAppState } from "./storage.js";
-import { GameSync, deleteRemoteAccount, fetchPlayerGameRefs, fetchRemoteGameState, joinRemoteGame, remoteGameExists, removeRemotePlayer } from "./sync.js";
+import { GameSync, deleteRemoteAccount, deleteRemoteGame, fetchPlayerGameRefs, fetchRemoteGameState, joinRemoteGame, remoteGameExists, removeRemotePlayer, resignRemoteGame } from "./sync.js";
 
 const HEX_SIZE = 34;
 const MIN_SCALE = 0.35;
@@ -42,6 +42,8 @@ const ui = {
   joinCode: "",
   joinError: "",
   joinChecking: false,
+  inviteGameId: null,
+  inviteAddingFriendIds: new Set(),
   linkDeviceOpen: false,
   linkDeviceCode: "",
   linkDeviceError: "",
@@ -52,6 +54,7 @@ const ui = {
   syncStatus: "idle",
   localOnly: false,
   notice: null,
+  globalNotice: null,
   confirmation: null,
   staged: [],
   hoverHex: null,
@@ -64,14 +67,17 @@ const ui = {
   drawQueued: false,
   resizeQueued: false,
   canvasSize: { width: 0, height: 0 },
-  camera: { x: 0, y: 0, scale: 1 }
+  camera: { x: 0, y: 0, scale: 1 },
+  cameraNeedsCenter: false
 };
 
 let game = appState.activeGameId && appState.games[appState.activeGameId]
   ? createGameState(appState.games[appState.activeGameId])
   : null;
-if (game?.id && appState.camerasByGame[game.id]) {
-  ui.camera = appState.camerasByGame[game.id];
+if (game?.id && isSavedCameraReady(appState.camerasByGame[game.id])) {
+  ui.camera = { ...appState.camerasByGame[game.id] };
+} else if (game?.id) {
+  ui.cameraNeedsCenter = true;
 }
 let sync = null;
 let toastTimer = null;
@@ -103,9 +109,54 @@ const APP_UPDATE_CHECK_MS = 30000;
 function save() {
   if (game?.id) {
     appState.games[game.id] = createGameState(game);
-    appState.camerasByGame[game.id] = ui.camera;
+    saveCameraForGame(game.id);
   }
   saveAppState(appState);
+}
+
+function isSavedCameraReady(camera) {
+  return Boolean(
+    camera &&
+    Number.isFinite(camera.x) &&
+    Number.isFinite(camera.y) &&
+    Number.isFinite(camera.scale) &&
+    !(camera.x === 0 && camera.y === 0 && camera.scale === 1)
+  );
+}
+
+function centeredCameraForSize(width, height) {
+  return {
+    x: width / 2,
+    y: height / 2,
+    scale: Math.min(1.05, Math.max(0.72, width / 460))
+  };
+}
+
+function centeredCameraForCurrentCanvas() {
+  const rect = canvas.getBoundingClientRect();
+  const width = ui.canvasSize.width || rect.width || 0;
+  const height = ui.canvasSize.height || rect.height || 0;
+  return width && height ? centeredCameraForSize(width, height) : { x: 0, y: 0, scale: 1 };
+}
+
+function loadCameraForGame(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  const camera = roomId ? appState.camerasByGame?.[roomId] : null;
+  if (isSavedCameraReady(camera)) {
+    ui.camera = { ...camera };
+    ui.cameraNeedsCenter = false;
+    return;
+  }
+
+  ui.camera = centeredCameraForCurrentCanvas();
+  ui.cameraNeedsCenter = true;
+}
+
+function saveCameraForGame(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  if (!roomId || ui.cameraNeedsCenter || !isSavedCameraReady(ui.camera)) return;
+  appState.camerasByGame ||= {};
+  appState.camerasByGame[roomId] = { ...ui.camera };
 }
 
 function currentPlayer() {
@@ -228,21 +279,20 @@ function toast(message) {
   if (ui.screen === null && game) {
     ui.notice = { message: String(message || ""), detail: "" };
     renderPreview();
-    toastTimer = setTimeout(() => {
-      ui.notice = null;
-      renderPreview();
-    }, 2200);
+    toastTimer = setTimeout(clearToastNotice, 2200);
     return;
   }
 
-  showMiniToast(message);
+  ui.globalNotice = { message: String(message || ""), detail: "" };
+  renderConfirmationToast();
+  toastTimer = setTimeout(clearToastNotice, 2200);
 }
 
-function showMiniToast(message) {
-  const el = $("toast");
-  el.textContent = message;
-  el.classList.add("visible");
-  toastTimer = setTimeout(() => el.classList.remove("visible"), 2200);
+function clearToastNotice() {
+  ui.notice = null;
+  ui.globalNotice = null;
+  if (ui.screen === null && game) renderPreview();
+  renderConfirmationToast();
 }
 
 async function copyText(value) {
@@ -304,15 +354,19 @@ function renderAll() {
   $("app").classList.toggle("active", showGame);
   $("setup-screen").classList.toggle("active", showSetup);
   $("home-screen").classList.toggle("active", showHome || showGame || showHomeUnderSetup);
+  $("invite-screen").classList.toggle("active", Boolean(ui.inviteGameId));
   $("leaderboard-screen").classList.toggle("active", ui.leaderboardOpen && showGame);
   $("history-screen").classList.toggle("active", ui.historyOpen && showGame);
+  renderInviteScreen();
   renderConfirmationToast();
 
   if (showSetup) {
     ui.leaderboardOpen = false;
     ui.historyOpen = false;
+    ui.inviteGameId = null;
     $("leaderboard-screen").classList.remove("active");
     $("history-screen").classList.remove("active");
+    $("invite-screen").classList.remove("active");
     document.body.classList.add("no-scroll");
     if (ui.screen === "new-game") renderNewGame();
     else renderSetup();
@@ -326,6 +380,7 @@ function renderAll() {
     $("history-screen").classList.remove("active");
     document.body.classList.add("no-scroll");
     renderHome();
+    renderInviteScreen();
     return;
   }
 
@@ -335,7 +390,7 @@ function renderAll() {
     return;
   }
 
-  document.body.classList.toggle("no-scroll", ui.leaderboardOpen || ui.historyOpen);
+  document.body.classList.toggle("no-scroll", ui.leaderboardOpen || ui.historyOpen || Boolean(ui.inviteGameId));
   if (!$("home-content").hasChildNodes()) renderHome();
   renderHud();
   renderTray();
@@ -551,8 +606,9 @@ function renderGameRow(state) {
   ];
   if (pending) stats.push(`${pending} pending`);
 
-  const shareLink = getGameLink(state.id);
   const unread = hasUnreadUpdates(state);
+  const canResign = Boolean(appState.session?.playerId && state.players?.[appState.session.playerId]);
+  const canDelete = Boolean(appState.session?.playerId && state.ownerId === appState.session.playerId);
 
   return `
     <article class="game-card ${ui.shareGameId === state.id ? "recently-shared" : ""} ${unread ? "has-updates" : ""}">
@@ -568,14 +624,60 @@ function renderGameRow(state) {
           <span>started ${esc(formatStarted(state.createdAt))}</span>
         </span>
       </button>
-      <div class="game-share-row">
-        <input type="text" class="game-share-link" value="${esc(shareLink)}" readonly aria-label="Share link for ${esc(state.id)}">
-        <div class="game-share-actions">
-          <button class="action-link" type="button" data-action="share-game-link" data-game-id="${esc(state.id)}">Share</button>
-          <button class="action-link" type="button" data-action="copy-game-link" data-game-id="${esc(state.id)}">Copy</button>
-        </div>
+      <div class="game-card-actions">
+        <button class="action-link" type="button" data-action="open-invite" data-game-id="${esc(state.id)}">Invite</button>
+        ${canResign ? `<button class="action-link danger" type="button" data-action="resign-game" data-game-id="${esc(state.id)}">Resign</button>` : ""}
+        ${canDelete ? `<button class="action-link danger" type="button" data-action="delete-game" data-game-id="${esc(state.id)}">Delete</button>` : ""}
       </div>
     </article>
+  `;
+}
+
+function renderInviteScreen() {
+  const roomId = normalizeRoomId(ui.inviteGameId);
+  const state = roomId && appState.games?.[roomId] ? createGameState(appState.games[roomId]) : null;
+  const screen = $("invite-screen");
+  const content = $("invite-content");
+  if (!roomId || !state) {
+    screen.classList.remove("active");
+    content.innerHTML = "";
+    return;
+  }
+
+  const shareLink = getGameLink(roomId);
+  const friends = Object.values(appState.friends || {})
+    .filter(friend => friend.id !== appState.session?.playerId && !state.players?.[friend.id])
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  content.innerHTML = `
+    <div class="overlay-header">
+      <h2>invite</h2>
+      <button class="action-link muted" type="button" data-action="close-invite">Close</button>
+    </div>
+    <label class="field-label" for="invite-link">Invite link</label>
+    <div class="copy-field">
+      <input type="text" class="field-input copy-input" id="invite-link" value="${esc(shareLink)}" readonly>
+      <div class="invite-link-actions">
+        <button class="action-link" type="button" data-action="share-invite" data-game-id="${esc(roomId)}">Share</button>
+        <button class="action-link" type="button" data-action="copy-invite" data-game-id="${esc(roomId)}">Copy</button>
+      </div>
+    </div>
+    <section class="friend-picker invite-friends" aria-label="Invite friends">
+      <h2>friends</h2>
+      ${friends.length ? `
+        <div class="friend-list">
+          ${friends.map(friend => {
+            const adding = ui.inviteAddingFriendIds.has(friend.id);
+            return `
+              <button class="friend-option" type="button" data-action="invite-friend" data-game-id="${esc(roomId)}" data-player-id="${esc(friend.id)}" ${adding ? "disabled" : ""}>
+                <strong>${esc(friend.name)}</strong>
+                <span>${adding ? "adding" : "add"}</span>
+              </button>
+            `;
+          }).join("")}
+        </div>
+      ` : '<p class="game-list-empty">No friends to add.</p>'}
+    </section>
   `;
 }
 
@@ -964,11 +1066,17 @@ function renderPreview() {
 function renderConfirmationToast() {
   const strip = $("confirmation-strip");
   const confirmation = ui.confirmation;
-  strip.hidden = !confirmation;
+  const notice = confirmation ? null : ui.globalNotice;
+  strip.hidden = !confirmation && !notice;
   strip.classList.toggle("notice", Boolean(confirmation && confirmation.tone !== "danger"));
   strip.classList.toggle("invalid", Boolean(confirmation?.tone === "danger"));
   if (!confirmation) {
-    strip.innerHTML = "";
+    strip.classList.toggle("notice", Boolean(notice));
+    strip.classList.remove("invalid");
+    strip.innerHTML = notice ? `
+      <span>${esc(notice.message)}</span>
+      <span class="confirmation-detail">${notice.detail ? esc(notice.detail) : ""}</span>
+    ` : "";
     return;
   }
 
@@ -1189,8 +1297,10 @@ async function createNewGame() {
     toast(`local game: ${error.message}`);
   }
 
+  appState.camerasByGame ||= {};
+  delete appState.camerasByGame[game.id];
   ui.camera = { x: 0, y: 0, scale: 1 };
-  appState.camerasByGame[game.id] = ui.camera;
+  ui.cameraNeedsCenter = true;
   markGameSeen(game.id);
   mergeFriends(Object.values(game.players || {}));
   ui.selectedFriendIds.clear();
@@ -1235,6 +1345,176 @@ async function joinGameByCode(codeInput = ui.joinCode) {
   }
 }
 
+function openInviteScreen(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  if (!roomId || !appState.games?.[roomId]) return;
+  ui.inviteGameId = roomId;
+  ui.inviteAddingFriendIds.clear();
+  renderAll();
+}
+
+function closeInviteScreen() {
+  ui.inviteGameId = null;
+  ui.inviteAddingFriendIds.clear();
+  renderAll();
+}
+
+async function addFriendToGame(gameId, friendId) {
+  const roomId = normalizeRoomId(gameId);
+  const friend = appState.friends?.[friendId];
+  if (!roomId || !friend || ui.inviteAddingFriendIds.has(friend.id)) return;
+
+  const base = appState.games?.[roomId] ? createGameState(appState.games[roomId]) : null;
+  if (!base || base.players?.[friend.id]) return;
+
+  ui.inviteAddingFriendIds.add(friend.id);
+  renderAll();
+
+  try {
+    const payload = await joinRemoteGame({
+      roomId,
+      playerId: appState.session.playerId,
+      name: appState.session.playerName,
+      invites: [friend],
+      state: base
+    });
+    storeGame(payload.state);
+    mergeFriends(Object.values(payload.state.players || {}));
+    markGameSeen(roomId);
+    saveAppState(appState);
+    toast("friend added");
+  } catch (error) {
+    try {
+      const joined = joinGame(base, { playerId: friend.id, name: friend.name });
+      storeGame(joined.state);
+      markGameSeen(roomId);
+      saveAppState(appState);
+      toast(`local add: ${error.message}`);
+    } catch (localError) {
+      toast(localError?.message || error?.message || "could not add friend");
+    }
+  } finally {
+    ui.inviteAddingFriendIds.delete(friend.id);
+    renderAll();
+  }
+}
+
+function resignFromGame(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  const state = roomId && appState.games?.[roomId] ? createGameState(appState.games[roomId]) : null;
+  const player = appState.session?.playerId ? state?.players?.[appState.session.playerId] : null;
+  if (!roomId || !state || !player) return;
+
+  askConfirmation({
+    message: "Resign from game?",
+    detail: "You will leave this game. Your words stay.",
+    yesText: "Yes",
+    noText: "No",
+    tone: "danger",
+    onConfirm: () => performResignFromGame(roomId)
+  });
+}
+
+function deleteGameFromList(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  const state = roomId && appState.games?.[roomId] ? createGameState(appState.games[roomId]) : null;
+  if (!roomId || !state || state.ownerId !== appState.session?.playerId) return;
+
+  askConfirmation({
+    message: "Delete game?",
+    detail: "This removes it for every player.",
+    yesText: "Yes",
+    noText: "No",
+    tone: "danger",
+    onConfirm: () => performDeleteGameFromList(roomId)
+  });
+}
+
+async function performDeleteGameFromList(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  const ownerId = appState.session?.playerId || "";
+  if (!roomId || !ownerId) return;
+
+  try {
+    await deleteRemoteGame({ roomId, ownerId });
+    forgetLocalGame(roomId);
+    saveAppState(appState);
+    renderAll();
+    toast("game deleted");
+  } catch (error) {
+    if (error?.status !== 404) {
+      toast(error?.message || "could not delete game");
+      return;
+    }
+
+    forgetLocalGame(roomId);
+    saveAppState(appState);
+    renderAll();
+    toast("game deleted locally");
+  }
+}
+
+async function performResignFromGame(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  const playerId = appState.session?.playerId || "";
+  if (!roomId || !playerId) return;
+
+  try {
+    await resignRemoteGame({ roomId, playerId });
+    forgetLocalGame(roomId);
+    saveAppState(appState);
+    renderAll();
+    toast("resigned");
+  } catch (error) {
+    if (error?.status !== 404) {
+      toast(error?.message || "could not resign");
+      return;
+    }
+
+    try {
+      resignFromLocalGame(roomId, playerId);
+      saveAppState(appState);
+      renderAll();
+      toast("resigned locally");
+    } catch (localError) {
+      toast(localError?.message || "could not resign");
+    }
+  }
+}
+
+function resignFromLocalGame(gameId, playerId) {
+  const roomId = normalizeRoomId(gameId);
+  const state = roomId && appState.games?.[roomId] ? createGameState(appState.games[roomId]) : null;
+  if (!state?.players?.[playerId]) {
+    forgetLocalGame(roomId);
+    return;
+  }
+
+  const result = removePlayerLocally(state, { playerId, allowOwnerRemoval: true });
+  if (Object.keys(result.state.players || {}).length) {
+    appState.games[roomId] = result.state;
+  }
+  forgetLocalGame(roomId);
+}
+
+function forgetLocalGame(gameId) {
+  const roomId = normalizeRoomId(gameId);
+  if (!roomId) return;
+  delete appState.games[roomId];
+  delete appState.pendingMovesByGame[roomId];
+  delete appState.camerasByGame[roomId];
+  delete appState.lastSeenByGame[roomId];
+  if (appState.linkedGameId === roomId) appState.linkedGameId = null;
+  if (appState.activeGameId === roomId) {
+    appState.activeGameId = null;
+    if (game?.id === roomId) game = null;
+    sync?.stop();
+    sync = null;
+    ui.screen = "home";
+  }
+  if (ui.inviteGameId === roomId) ui.inviteGameId = null;
+}
+
 async function openGame(gameId, options = {}) {
   const roomId = normalizeRoomId(gameId);
   if (!roomId) return;
@@ -1258,7 +1538,7 @@ async function openGame(gameId, options = {}) {
     tileBagCount: options.tileBagCount || appState.games[roomId]?.tileBagCount
   }));
   markGameSeen(roomId);
-  ui.camera = appState.camerasByGame[roomId] || { x: 0, y: 0, scale: 1 };
+  loadCameraForGame(roomId);
   ui.localOnly = false;
   ui.syncStatus = "syncing";
   ui.screen = null;
@@ -1437,6 +1717,7 @@ function resetUiAfterAccountDelete() {
   ui.syncStatus = "idle";
   ui.localOnly = false;
   ui.notice = null;
+  ui.globalNotice = null;
   ui.confirmation = null;
   ui.staged = [];
   ui.hoverHex = null;
@@ -1447,6 +1728,7 @@ function resetUiAfterAccountDelete() {
   ui.flushing = false;
   ui.resetting = false;
   ui.camera = { x: 0, y: 0, scale: 1 };
+  ui.cameraNeedsCenter = false;
 }
 
 function goHome() {
@@ -1834,10 +2116,10 @@ function resizeCanvas() {
   canvas.height = Math.max(1, Math.floor(rect.height * dpr));
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  if (!game?.id || !appState.camerasByGame[game.id] || wasZeroSized) {
-    ui.camera.x = rect.width / 2;
-    ui.camera.y = rect.height / 2;
-    ui.camera.scale = Math.min(1.05, Math.max(0.72, rect.width / 460));
+  if (!game?.id || ui.cameraNeedsCenter || !isSavedCameraReady(appState.camerasByGame[game.id]) || wasZeroSized) {
+    ui.camera = centeredCameraForSize(rect.width, rect.height);
+    ui.cameraNeedsCenter = false;
+    if (game?.id) saveCameraForGame(game.id);
   }
 
   scheduleDraw();
@@ -2075,6 +2357,7 @@ function updateTouchGesture() {
   ui.camera.scale = scale;
   ui.camera.x = mid.x - worldAtStart.x * scale;
   ui.camera.y = mid.y - worldAtStart.y * scale;
+  ui.cameraNeedsCenter = false;
   save();
   scheduleDraw();
 }
@@ -2084,6 +2367,12 @@ function wireEvents() {
     if (event.key === "Escape" && ui.confirmation) {
       event.preventDefault();
       cancelCurrentAction();
+      return;
+    }
+
+    if (event.key === "Escape" && ui.inviteGameId) {
+      event.preventDefault();
+      closeInviteScreen();
       return;
     }
 
@@ -2229,20 +2518,18 @@ function wireEvents() {
       return;
     }
 
-    if (action === "copy-game-link") {
-      const link = getGameLink(target.dataset.gameId);
-      ui.shareGameId = normalizeRoomId(target.dataset.gameId);
-      copyText(link)
-        .then(() => {
-          toast("copied");
-          renderAll();
-        })
-        .catch(() => toast("copy failed"));
+    if (action === "open-invite") {
+      openInviteScreen(target.dataset.gameId);
       return;
     }
 
-    if (action === "share-game-link") {
-      shareGameLink(target.dataset.gameId);
+    if (action === "resign-game") {
+      resignFromGame(target.dataset.gameId);
+      return;
+    }
+
+    if (action === "delete-game") {
+      deleteGameFromList(target.dataset.gameId);
       return;
     }
 
@@ -2262,6 +2549,43 @@ function wireEvents() {
     if (event.target.id !== "join-code-input") return;
     ui.joinCode = event.target.value;
     ui.joinError = "";
+  });
+
+  $("invite-screen").addEventListener("click", event => {
+    if (event.target.id === "invite-screen") {
+      closeInviteScreen();
+      return;
+    }
+
+    const target = event.target.closest("[data-action]");
+    const action = target?.dataset.action;
+    if (!action) return;
+
+    if (action === "close-invite") {
+      closeInviteScreen();
+      return;
+    }
+
+    if (action === "copy-invite") {
+      const link = getGameLink(target.dataset.gameId);
+      ui.shareGameId = normalizeRoomId(target.dataset.gameId);
+      copyText(link)
+        .then(() => {
+          toast("copied");
+          renderAll();
+        })
+        .catch(() => toast("copy failed"));
+      return;
+    }
+
+    if (action === "share-invite") {
+      shareGameLink(target.dataset.gameId);
+      return;
+    }
+
+    if (action === "invite-friend") {
+      addFriendToGame(target.dataset.gameId, target.closest("[data-player-id]")?.dataset.playerId);
+    }
   });
 
   $("room-line").addEventListener("click", event => {
@@ -2368,6 +2692,7 @@ function wireEvents() {
     if (ui.pan?.pointerId === event.pointerId) {
       ui.camera.x = ui.pan.camera.x + (event.clientX - ui.pan.x);
       ui.camera.y = ui.pan.camera.y + (event.clientY - ui.pan.y);
+      ui.cameraNeedsCenter = false;
       save();
       scheduleDraw();
     }
@@ -2396,6 +2721,7 @@ function wireEvents() {
     clampCamera();
     ui.camera.x = point.x - before.x * ui.camera.scale;
     ui.camera.y = point.y - before.y * ui.camera.scale;
+    ui.cameraNeedsCenter = false;
     save();
     scheduleDraw();
   }, { passive: false });
