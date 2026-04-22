@@ -33,8 +33,12 @@
         : (globalThis.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light");
       document.documentElement.dataset.theme = theme;
       document.documentElement.style.colorScheme = theme;
+      document.documentElement.style.backgroundColor = themeColors[theme];
       document.querySelector('meta[name="theme-color"]')?.setAttribute("content", themeColors[theme]);
       document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute("content", statusBars[theme]);
+      document.addEventListener("DOMContentLoaded", () => {
+        document.body.style.backgroundColor = themeColors[theme];
+      }, { once: true });
     })();
   </script>
   <link rel="stylesheet" href="./styles.css">

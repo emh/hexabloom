@@ -154,6 +154,8 @@ function applyTheme(theme) {
   const nextTheme = normalizeTheme(theme) || "light";
   document.documentElement.dataset.theme = nextTheme;
   document.documentElement.style.colorScheme = nextTheme;
+  document.documentElement.style.backgroundColor = THEME_COLORS[nextTheme];
+  document.body.style.backgroundColor = THEME_COLORS[nextTheme];
   document.querySelector('meta[name="theme-color"]')?.setAttribute("content", THEME_COLORS[nextTheme]);
   document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute("content", THEME_STATUS_BARS[nextTheme]);
   updateThemeToggles(nextTheme);
