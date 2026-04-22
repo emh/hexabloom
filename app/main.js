@@ -714,13 +714,9 @@ function decodeLinkPayload(value) {
 function renderHud() {
   const player = currentPlayer();
   const players = orderedPlayers(game.players);
-  const leader = players[0];
   const occupied = Object.keys(game.board).length;
   const playerLabel = `${players.length} ${players.length === 1 ? "player" : "players"}`;
   const complete = isGameComplete(game);
-  const tileCounts = players.map(entry => `
-    <span>${esc(entry.name)} ${playerTilesLeft(entry)} left</span>
-  `).join("");
 
   $("room-line").innerHTML = `
     <span>${occupied} tiles</span>
@@ -741,8 +737,6 @@ function renderHud() {
 
   $("stats-row").innerHTML = `
     <span>${player ? `score ${player.score}` : "score 0"}</span>
-    <span>${leader ? `leader ${esc(leader.name)} ${leader.score}` : "leader -"}</span>
-    ${tileCounts}
   `;
 }
 
@@ -754,6 +748,7 @@ function renderLeaderboard() {
       <strong>${esc(player.name)}</strong>
       <span>${player.turnCount}</span>
       <span>${player.score}</span>
+      <span>${player.tilesLeft}</span>
     </div>
   `).join("") : '<p class="leaderboard-empty">No players yet.</p>';
 
@@ -768,6 +763,7 @@ function renderLeaderboard() {
         <span>player</span>
         <span>turns</span>
         <span>score</span>
+        <span>tiles</span>
       </div>
       ${rows}
     </div>
@@ -851,7 +847,8 @@ function leaderboardPlayers() {
 
   return orderedPlayers(game.players).map(player => ({
     ...player,
-    turnCount: turnCounts.get(player.id) || 0
+    turnCount: turnCounts.get(player.id) || 0,
+    tilesLeft: playerTilesLeft(player)
   }));
 }
 

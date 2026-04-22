@@ -893,7 +893,7 @@ body.no-scroll {
 
 .leaderboard-row {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) 78px 78px;
+  grid-template-columns: 32px minmax(0, 1fr) 68px 68px 68px;
   gap: 12px;
   align-items: baseline;
   padding: 11px 0;
