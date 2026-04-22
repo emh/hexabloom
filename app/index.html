@@ -21,6 +21,7 @@
   <script>
     (() => {
       const themeColors = { light: "#fbfff8", dark: "#10130f" };
+      const statusBars = { light: "default", dark: "black-translucent" };
       let stored = "";
       try {
         stored = localStorage.getItem("hexabloom_theme") || "";
@@ -33,6 +34,7 @@
       document.documentElement.dataset.theme = theme;
       document.documentElement.style.colorScheme = theme;
       document.querySelector('meta[name="theme-color"]')?.setAttribute("content", themeColors[theme]);
+      document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute("content", statusBars[theme]);
     })();
   </script>
   <link rel="stylesheet" href="./styles.css">

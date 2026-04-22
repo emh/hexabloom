@@ -33,6 +33,10 @@ const THEME_COLORS = {
   light: "#fbfff8",
   dark: "#10130f"
 };
+const THEME_STATUS_BARS = {
+  light: "default",
+  dark: "black-translucent"
+};
 const SYSTEM_THEME_QUERY = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
 const appState = loadAppState();
@@ -151,6 +155,7 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = nextTheme;
   document.documentElement.style.colorScheme = nextTheme;
   document.querySelector('meta[name="theme-color"]')?.setAttribute("content", THEME_COLORS[nextTheme]);
+  document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute("content", THEME_STATUS_BARS[nextTheme]);
   updateThemeToggles(nextTheme);
   if (game && ui.leaderboardOpen) renderLeaderboard();
   if (ui.canvasSize.width && ui.canvasSize.height) scheduleDraw();

@@ -57,6 +57,7 @@
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: "SF Mono", "Menlo", "Consolas", "Liberation Mono", monospace;
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  background: var(--paper);
 }
 
 :root[data-theme="dark"] {
@@ -127,6 +128,7 @@
 
 html {
   height: 100%;
+  background: var(--paper);
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
