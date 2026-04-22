@@ -188,11 +188,11 @@ export class GameSync {
   }
 }
 
-export async function joinRemoteGame({ roomId = GLOBAL_ROOM_ID, playerId, name, tileBagCount }, settings = loadSettings()) {
+export async function joinRemoteGame({ roomId = GLOBAL_ROOM_ID, playerId, name, tileBagCount, invites = [] }, settings = loadSettings()) {
   const response = await fetch(getGameEndpoint(settings.apiBaseUrl, roomId, "/join"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ playerId, name, tileBagCount })
+    body: JSON.stringify({ playerId, name, tileBagCount, invites })
   });
 
   if (!response.ok) throw await responseError(response);
@@ -211,9 +211,30 @@ export async function remoteGameExists(roomId, settings = loadSettings()) {
   return Boolean(payload.exists);
 }
 
+export async function fetchRemoteGameState(roomId, settings = loadSettings()) {
+  const response = await fetch(getGameEndpoint(settings.apiBaseUrl, roomId, "/state"));
+  if (!response.ok) throw await responseError(response);
+  const payload = await response.json();
+  return createGameState(payload.state || payload.game || payload);
+}
+
+export async function fetchPlayerInvites(playerId, settings = loadSettings()) {
+  if (!settings.apiBaseUrl || !playerId) return { invites: [] };
+  const response = await fetch(getPlayerEndpoint(settings.apiBaseUrl, playerId, "/invites"));
+  if (!response.ok) throw await responseError(response);
+  const payload = await response.json();
+  return {
+    invites: Array.isArray(payload.invites) ? payload.invites : []
+  };
+}
+
 function getEndpoint(apiBaseUrl, path) {
   const base = apiBaseUrl.replace(/\/+$/, "");
   return new URL(path, `${base}/`).toString();
+}
+
+function getPlayerEndpoint(apiBaseUrl, playerId, path) {
+  return getEndpoint(apiBaseUrl, `/player/${encodeURIComponent(String(playerId || ""))}${path}`);
 }
 
 function getGameEndpoint(apiBaseUrl, roomId, path) {

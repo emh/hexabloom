@@ -21,7 +21,7 @@ import {
   validateMove
 } from "./model.js";
 import { loadAppState, saveAppState } from "./storage.js";
-import { GameSync, joinRemoteGame, remoteGameExists } from "./sync.js";
+import { GameSync, fetchPlayerInvites, fetchRemoteGameState, joinRemoteGame, remoteGameExists } from "./sync.js";
 
 const HEX_SIZE = 34;
 const MIN_SCALE = 0.35;
@@ -41,6 +41,7 @@ const ui = {
   joinCode: "",
   joinError: "",
   joinChecking: false,
+  selectedFriendIds: new Set(),
   leaderboardOpen: false,
   historyOpen: false,
   syncStatus: "idle",
@@ -70,6 +71,7 @@ let sync = null;
 let toastTimer = null;
 const homeSyncs = new Map();
 const homeSyncChecks = new Set();
+let inviteInboxInFlight = false;
 
 const $ = id => document.getElementById(id);
 const canvas = $("board-canvas");
@@ -121,7 +123,74 @@ function markGameSeen(gameId) {
 function hasUnreadUpdates(state) {
   const seenAt = Date.parse(appState.lastSeenByGame?.[state.id] || "");
   const updatedAt = Date.parse(state.updatedAt || "");
-  return Number.isFinite(seenAt) && Number.isFinite(updatedAt) && updatedAt > seenAt;
+  return Number.isFinite(updatedAt) && (!Number.isFinite(seenAt) || updatedAt > seenAt);
+}
+
+function mergeFriends(friends = []) {
+  appState.friends ||= {};
+  const selfId = appState.session?.playerId || "";
+  let changed = false;
+
+  for (const friend of friends) {
+    const id = String(friend?.id || "").trim().slice(0, 128);
+    const name = normalizePlayerName(friend?.name);
+    if (!id || !name || id === selfId) continue;
+    if (appState.friends[id]?.name === name) continue;
+    appState.friends[id] = { id, name };
+    changed = true;
+  }
+
+  return changed;
+}
+
+function deriveFriendsFromLocalGames() {
+  let changed = false;
+  for (const value of Object.values(appState.games || {})) {
+    changed = mergeFriends(Object.values(createGameState(value).players || {})) || changed;
+  }
+  return changed;
+}
+
+function showNewGameIfEmpty() {
+  if (Object.keys(appState.games || {}).length || ui.screen !== "home") return false;
+  ui.nameReturnScreen = "home";
+  ui.newGameLength = DEFAULT_GAME_LENGTH;
+  ui.screen = "new-game";
+  return true;
+}
+
+async function syncInviteInbox(options = {}) {
+  if (!appState.session?.playerId || inviteInboxInFlight) return;
+  const wasEmpty = !Object.keys(appState.games || {}).length;
+  let importedGame = false;
+  inviteInboxInFlight = true;
+
+  try {
+    const { invites } = await fetchPlayerInvites(appState.session.playerId);
+    for (const invite of invites || []) {
+      const roomId = normalizeRoomId(invite?.gameId);
+      if (!roomId) continue;
+      try {
+        const remote = await fetchRemoteGameState(roomId);
+        const stored = storeGame(remote);
+        importedGame = Boolean(stored.id) || importedGame;
+        mergeFriends(Object.values(remote.players || {}));
+      } catch {
+        // Invite discovery should never make the local list unusable.
+      }
+    }
+    deriveFriendsFromLocalGames();
+    saveAppState(appState);
+    if (options.openHomeOnImport && wasEmpty && importedGame && ui.screen === "new-game") ui.screen = "home";
+    showNewGameIfEmpty();
+    if (options.render !== false && (ui.screen === "home" || ui.screen === "new-game")) renderAll();
+  } catch {
+    // The local list remains usable offline.
+    showNewGameIfEmpty();
+    if (options.render !== false && ui.screen === "new-game") renderAll();
+  } finally {
+    inviteInboxInFlight = false;
+  }
 }
 
 function esc(value) {
@@ -208,11 +277,12 @@ function renderAll() {
   const showHomeUnderSetup = showSetup && appState.session && ui.nameReturnScreen !== "game";
   if (showHome) startHomeStreams();
   else stopHomeStreams();
+  $("app").hidden = false;
+  $("app").classList.toggle("active", showGame);
   $("setup-screen").classList.toggle("active", showSetup);
-  $("home-screen").classList.toggle("active", showHome || showHomeUnderSetup);
+  $("home-screen").classList.toggle("active", showHome || showGame || showHomeUnderSetup);
   $("leaderboard-screen").classList.toggle("active", ui.leaderboardOpen && showGame);
   $("history-screen").classList.toggle("active", ui.historyOpen && showGame);
-  $("app").hidden = !showGame;
 
   if (showSetup) {
     ui.leaderboardOpen = false;
@@ -242,6 +312,7 @@ function renderAll() {
   }
 
   document.body.classList.toggle("no-scroll", ui.leaderboardOpen || ui.historyOpen);
+  if (!$("home-content").hasChildNodes()) renderHome();
   renderHud();
   renderTray();
   renderPreview();
@@ -251,6 +322,7 @@ function renderAll() {
 }
 
 function startHomeStreams() {
+  syncInviteInbox();
   const ids = Object.keys(appState.games || {}).map(normalizeRoomId).filter(Boolean);
   const idSet = new Set(ids);
 
@@ -360,6 +432,7 @@ function renderHome() {
 }
 
 function renderNewGame() {
+  deriveFriendsFromLocalGames();
   const selected = GAME_LENGTHS[ui.newGameLength] ? ui.newGameLength : DEFAULT_GAME_LENGTH;
   const options = Object.values(GAME_LENGTHS).map(length => `
     <button class="length-option ${selected === length.key ? "selected" : ""}" type="button" data-action="choose-length" data-length="${length.key}" aria-pressed="${selected === length.key}">
@@ -367,6 +440,9 @@ function renderNewGame() {
       <span>${length.tileBagCount} ${length.tileBagCount === 1 ? "bag" : "bags"}</span>
     </button>
   `).join("");
+  const friends = Object.values(appState.friends || {})
+    .filter(friend => friend.id !== appState.session?.playerId)
+    .sort((left, right) => left.name.localeCompare(right.name));
 
   $("setup-content").innerHTML = `
     <h1>new game</h1>
@@ -374,6 +450,19 @@ function renderNewGame() {
     <div class="length-options" role="group" aria-label="Game length">
       ${options}
     </div>
+    ${friends.length ? `
+      <section class="friend-picker" aria-label="Invite friends">
+        <h2>invite friends</h2>
+        <div class="friend-list">
+          ${friends.map(friend => `
+            <button class="friend-option ${ui.selectedFriendIds.has(friend.id) ? "selected" : ""}" type="button" data-action="toggle-friend" data-player-id="${esc(friend.id)}" aria-pressed="${ui.selectedFriendIds.has(friend.id)}">
+              <strong>${esc(friend.name)}</strong>
+              <span>${ui.selectedFriendIds.has(friend.id) ? "added" : "add"}</span>
+            </button>
+          `).join("")}
+        </div>
+      </section>
+    ` : ""}
     <div class="detail-actions setup-actions">
       <button class="action-link primary" type="button" data-action="create-game">Create</button>
       <button class="action-link muted" type="button" data-action="cancel-new-game">Cancel</button>
@@ -812,17 +901,11 @@ async function savePlayerName(nameInput) {
     return;
   }
 
-  if (!Object.keys(appState.games || {}).length) {
-    ui.nameReturnScreen = "home";
-    ui.newGameLength = DEFAULT_GAME_LENGTH;
-    ui.screen = "new-game";
-    renderAll();
-    return;
-  }
-
   ui.nameReturnScreen = "home";
-  ui.screen = "home";
+  ui.newGameLength = DEFAULT_GAME_LENGTH;
+  ui.screen = Object.keys(appState.games || {}).length ? "home" : "new-game";
   renderAll();
+  syncInviteInbox({ openHomeOnImport: true });
 }
 
 async function createNewGame() {
@@ -837,11 +920,14 @@ async function createNewGame() {
   const roomId = randomRoomId();
   const playerId = appState.session.playerId;
   const playerName = appState.session.playerName;
+  const invites = [...ui.selectedFriendIds]
+    .map(id => appState.friends?.[id])
+    .filter(Boolean);
   ui.syncStatus = "syncing";
   renderAll();
 
   try {
-    const payload = await joinRemoteGame({ roomId, playerId, name: playerName, tileBagCount: length.tileBagCount });
+    const payload = await joinRemoteGame({ roomId, playerId, name: playerName, tileBagCount: length.tileBagCount, invites });
     game = storeGame(payload.state);
     appState.activeGameId = game.id;
     appState.session = { ...appState.session, roomId: game.id };
@@ -850,8 +936,11 @@ async function createNewGame() {
     toast("game created");
   } catch (error) {
     const base = createGameState({ id: roomId, tileBagCount: length.tileBagCount });
-    const joined = joinGame(base, { playerId, name: playerName });
-    game = storeGame(joined.state);
+    let local = joinGame(base, { playerId, name: playerName }).state;
+    for (const invite of invites) {
+      local = joinGame(local, { playerId: invite.id, name: invite.name }).state;
+    }
+    game = storeGame(local);
     appState.activeGameId = game.id;
     appState.session = { ...appState.session, roomId: game.id };
     appState.linkedGameId = null;
@@ -863,6 +952,8 @@ async function createNewGame() {
   ui.camera = { x: 0, y: 0, scale: 1 };
   appState.camerasByGame[game.id] = ui.camera;
   markGameSeen(game.id);
+  mergeFriends(Object.values(game.players || {}));
+  ui.selectedFriendIds.clear();
   ui.shareGameId = game.id;
   ui.screen = "home";
   saveAppState(appState);
@@ -948,6 +1039,7 @@ async function openGame(gameId, options = {}) {
     appState.session = { ...appState.session, roomId: game.id };
     appState.linkedGameId = null;
     ui.localOnly = false;
+    mergeFriends(Object.values(game.players || {}));
     markGameSeen(game.id);
     save();
     startSync();
@@ -965,6 +1057,7 @@ async function openGame(gameId, options = {}) {
     appState.linkedGameId = null;
     ui.localOnly = true;
     ui.syncStatus = "local";
+    mergeFriends(Object.values(game.players || {}));
     markGameSeen(game.id);
     save();
     renderAll();
@@ -993,6 +1086,7 @@ function startSync() {
     onState: state => {
       game = storeGame(state);
       appState.activeGameId = game.id;
+      mergeFriends(Object.values(game.players || {}));
       markGameSeen(game.id);
       pruneStagedTiles();
       save();
@@ -1643,12 +1737,21 @@ function wireEvents() {
       return;
     }
 
+    if (action === "toggle-friend") {
+      const playerId = event.target.closest("[data-player-id]")?.dataset.playerId;
+      if (ui.selectedFriendIds.has(playerId)) ui.selectedFriendIds.delete(playerId);
+      else if (appState.friends?.[playerId]) ui.selectedFriendIds.add(playerId);
+      renderAll();
+      return;
+    }
+
     if (action === "create-game") {
       createNewGame();
       return;
     }
 
     if (action === "cancel-new-game") {
+      ui.selectedFriendIds.clear();
       ui.screen = "home";
       renderAll();
     }
@@ -1673,6 +1776,8 @@ function wireEvents() {
 
     if (action === "new-game") {
       ui.newGameLength = DEFAULT_GAME_LENGTH;
+      ui.selectedFriendIds.clear();
+      syncInviteInbox();
       ui.joinOpen = false;
       ui.joinError = "";
       ui.screen = "new-game";
@@ -1883,6 +1988,7 @@ function isHardResetHotkey(event) {
   );
 }
 
+if (deriveFriendsFromLocalGames()) saveAppState(appState);
 wireEvents();
 renderAll();
 if (appState.session?.playerName && appState.linkedGameId) {

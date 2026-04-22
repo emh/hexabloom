@@ -1,7 +1,7 @@
 import { GLOBAL_ROOM_ID, createDeviceId, createGameState, normalizeRoomId } from "./model.js";
 
 export const STATE_STORAGE_KEY = "hexabloom_v1";
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export function loadAppState() {
   try {
@@ -25,7 +25,8 @@ export function saveAppState(state) {
       games: normalizeGames(state.games),
       pendingMovesByGame: normalizePendingMovesByGame(state.pendingMovesByGame),
       camerasByGame: normalizeCamerasByGame(state.camerasByGame),
-      lastSeenByGame: normalizeLastSeenByGame(state.lastSeenByGame)
+      lastSeenByGame: normalizeLastSeenByGame(state.lastSeenByGame),
+      friends: normalizeFriends(state.friends)
     }));
   } catch {
     // Local storage can fail in private windows or quota pressure.
@@ -42,7 +43,8 @@ export function createInitialState() {
     games: {},
     pendingMovesByGame: {},
     camerasByGame: {},
-    lastSeenByGame: {}
+    lastSeenByGame: {},
+    friends: {}
   };
 }
 
@@ -80,7 +82,8 @@ export function normalizeStoredState(input = {}) {
     games,
     pendingMovesByGame,
     camerasByGame,
-    lastSeenByGame
+    lastSeenByGame,
+    friends: normalizeFriends(input.friends)
   };
 }
 
@@ -149,6 +152,21 @@ function normalizeLastSeenByGame(input = {}) {
   }
 
   return lastSeen;
+}
+
+function normalizeFriends(input = {}) {
+  const friends = {};
+  if (!input || typeof input !== "object") return friends;
+
+  const values = Array.isArray(input) ? input : Object.values(input);
+  for (const friend of values) {
+    const id = typeof friend?.id === "string" ? friend.id.trim().slice(0, 128) : "";
+    const name = typeof friend?.name === "string" ? friend.name.replace(/\s+/g, " ").trim().slice(0, 40) : "";
+    if (!id || !name) continue;
+    friends[id] = { id, name };
+  }
+
+  return friends;
 }
 
 function normalizeCamera(input = {}) {

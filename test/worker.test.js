@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseGameRoute } from "../workers/game/src/index.js";
+import { parseGameRoute, parsePlayerRoute } from "../workers/game/src/index.js";
 
 test("parseGameRoute recognizes game API routes", () => {
   assert.deepEqual(parseGameRoute("/game/join"), { roomId: "BOARD", action: "join" });
@@ -18,4 +18,11 @@ test("parseGameRoute recognizes game API routes", () => {
   assert.deepEqual(parseGameRoute("/game/ABC123/state"), { roomId: "ABC123", action: "state" });
   assert.deepEqual(parseGameRoute("/game/ABC123/stream"), { roomId: "ABC123", action: "stream" });
   assert.equal(parseGameRoute("/api/groups/ABC123/sync"), null);
+});
+
+test("parsePlayerRoute recognizes player invite routes", () => {
+  assert.deepEqual(parsePlayerRoute("/player/p1/invites"), { playerId: "p1", action: "invites" });
+  assert.deepEqual(parsePlayerRoute("/player/player%201/invites"), { playerId: "player 1", action: "invites" });
+  assert.equal(parsePlayerRoute("/player/p1/friends"), null);
+  assert.equal(parsePlayerRoute("/player/p1/games"), null);
 });

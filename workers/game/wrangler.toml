@@ -7,9 +7,17 @@ workers_dev = true
 name = "GAME_ROOM"
 class_name = "GameRoom"
 
+[[durable_objects.bindings]]
+name = "INVITE_INBOX"
+class_name = "InviteInbox"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = [ "GameRoom" ]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = [ "InviteInbox" ]
 
 [vars]
 ALLOWED_ORIGINS = "http://localhost:8031,http://127.0.0.1:8031,http://192.168.1.148:8031,https://emh.github.io,https://emh.io"

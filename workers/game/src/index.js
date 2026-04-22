@@ -1,4 +1,4 @@
-import { GLOBAL_ROOM_ID, GameRuleError, RACK_SIZE, applyMove, createGameState, joinGame, normalizeRoomId, normalizeWord, resetGameState } from "../../../app/model.js";
+import { GLOBAL_ROOM_ID, GameRuleError, RACK_SIZE, applyMove, createGameState, joinGame, normalizePlayerName, normalizeRoomId, normalizeWord, resetGameState } from "../../../app/model.js";
 import { DICTIONARY_WORDS } from "./dictionary.generated.js";
 
 const MOVE_VALIDATION = {
@@ -81,9 +81,17 @@ export class GameRoom {
       name: body.name
     });
     this.game = joined.state;
+    const invited = [];
+    for (const invite of normalizeInvites(body.invites)) {
+      if (invite.playerId === joined.player.id) continue;
+      const result = joinGame(this.game, invite);
+      this.game = result.state;
+      invited.push(result.player);
+    }
     await this.save();
+    if (invited.length) await enqueueInvites(this.env, this.game, invited, joined.player);
     this.broadcast(null, { type: "state", state: this.game });
-    return json({ state: this.game, player: joined.player, created: joined.created }, 200, cors);
+    return json({ state: this.game, player: joined.player, invited, created: joined.created }, 200, cors);
   }
 
   async move(request, roomId, cors) {
@@ -223,6 +231,76 @@ export class GameRoom {
   }
 }
 
+export class InviteInbox {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.inboxes = null;
+    this.ready = this.initialize();
+  }
+
+  async initialize() {
+    this.inboxes = await this.state.storage.get("inboxes") || {};
+  }
+
+  async fetch(request) {
+    await this.ready;
+    const cors = corsHeaders(request, this.env);
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: cors });
+    }
+
+    if (!isAllowedOrigin(request, this.env)) {
+      return json({ error: "Origin not allowed" }, 403, cors);
+    }
+
+    const url = new URL(request.url);
+
+    if (url.pathname === "/internal/invite" && request.method === "POST") {
+      const body = await readJson(request);
+      await this.addInvites(body);
+      return json({ ok: true }, 200, cors);
+    }
+
+    const route = parsePlayerRoute(url.pathname);
+    if (!route) return json({ error: "Not found" }, 404, cors);
+
+    if (route.action === "invites" && request.method === "GET") {
+      return json({ invites: this.playerInvites(route.playerId) }, 200, cors);
+    }
+
+    return json({ error: "Not found" }, 404, cors);
+  }
+
+  async addInvites(input = {}) {
+    const gameId = normalizeRoomId(input.gameId);
+    if (!gameId) return;
+
+    const inviter = {
+      id: String(input.invitedBy?.id || "").trim().slice(0, 128),
+      name: normalizePlayerName(input.invitedBy?.name) || "Player"
+    };
+    const invitedAt = typeof input.invitedAt === "string" ? input.invitedAt : new Date().toISOString();
+
+    for (const invite of normalizeInvites(input.invites)) {
+      this.inboxes[invite.playerId] ||= {};
+      this.inboxes[invite.playerId][gameId] = {
+        gameId,
+        invitedAt,
+        invitedBy: inviter
+      };
+    }
+
+    await this.state.storage.put("inboxes", this.inboxes);
+  }
+
+  playerInvites(playerId) {
+    const inbox = this.inboxes[String(playerId || "").trim().slice(0, 128)] || {};
+    return Object.values(inbox).sort((left, right) => Date.parse(right.invitedAt) - Date.parse(left.invitedAt));
+  }
+}
+
 export default {
   async fetch(request, env) {
     const cors = corsHeaders(request, env);
@@ -234,7 +312,15 @@ export default {
       return json({ error: "Origin not allowed" }, 403, cors);
     }
 
-    const route = parseGameRoute(new URL(request.url).pathname);
+    const pathname = new URL(request.url).pathname;
+    const playerRoute = parsePlayerRoute(pathname);
+    if (playerRoute) {
+      const id = env.INVITE_INBOX.idFromName("invites");
+      const inbox = env.INVITE_INBOX.get(id);
+      return inbox.fetch(request);
+    }
+
+    const route = parseGameRoute(pathname);
     if (!route) return json({ error: "Not found" }, 404, cors);
 
     const id = env.GAME_ROOM.idFromName(route.roomId);
@@ -256,6 +342,15 @@ export function parseGameRoute(pathname) {
   if (!match) return null;
   return {
     roomId: normalizeRoomId(match[1]),
+    action: match[2]
+  };
+}
+
+export function parsePlayerRoute(pathname) {
+  const match = /^\/player\/([^/]+)\/(invites)\/?$/.exec(pathname);
+  if (!match) return null;
+  return {
+    playerId: decodeURIComponent(match[1]).trim().slice(0, 128),
     action: match[2]
   };
 }
@@ -306,6 +401,46 @@ function sameStringSet(left, right) {
 
 function hasOversizedRacks(game) {
   return Object.values(game?.players || {}).some(player => Array.isArray(player?.rack) && player.rack.length > RACK_SIZE);
+}
+
+function normalizeInvites(input = []) {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set();
+  const invites = [];
+
+  for (const item of input) {
+    const playerId = String(item?.playerId || item?.id || "").trim().slice(0, 128);
+    if (!playerId || seen.has(playerId)) continue;
+    seen.add(playerId);
+    invites.push({
+      playerId,
+      name: normalizePlayerName(item?.name) || "Player"
+    });
+    if (invites.length >= 20) break;
+  }
+
+  return invites;
+}
+
+async function enqueueInvites(env, game, invites, invitedBy) {
+  if (!env.INVITE_INBOX || !game?.id || !invites?.length) return;
+
+  try {
+    const id = env.INVITE_INBOX.idFromName("invites");
+    const inbox = env.INVITE_INBOX.get(id);
+    await inbox.fetch("https://invite-inbox/internal/invite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        gameId: game.id,
+        invites,
+        invitedBy,
+        invitedAt: new Date().toISOString()
+      })
+    });
+  } catch {
+    // Game state is still authoritative if the invite relay is temporarily unavailable.
+  }
 }
 
 function isPrivateDevOrigin(origin) {
