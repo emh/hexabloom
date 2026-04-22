@@ -33,10 +33,8 @@ const THEME_COLORS = {
   light: "#fbfff8",
   dark: "#10130f"
 };
-const THEME_STATUS_BARS = {
-  light: "default",
-  dark: "black-translucent"
-};
+const APP_UPDATE_RELOAD_STORAGE_KEY = "hexabloom_app_update_reload_at";
+const APP_UPDATE_RELOAD_MIN_MS = 60000;
 const SYSTEM_THEME_QUERY = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
 const appState = loadAppState();
@@ -154,13 +152,21 @@ function applyTheme(theme) {
   const nextTheme = normalizeTheme(theme) || "light";
   document.documentElement.dataset.theme = nextTheme;
   document.documentElement.style.colorScheme = nextTheme;
-  document.documentElement.style.backgroundColor = THEME_COLORS[nextTheme];
-  document.body.style.backgroundColor = THEME_COLORS[nextTheme];
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", THEME_COLORS[nextTheme]);
-  document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute("content", THEME_STATUS_BARS[nextTheme]);
+  syncViewportTheme(nextTheme);
   updateThemeToggles(nextTheme);
   if (game && ui.leaderboardOpen) renderLeaderboard();
   if (ui.canvasSize.width && ui.canvasSize.height) scheduleDraw();
+}
+
+function syncViewportTheme(theme) {
+  const color = THEME_COLORS[theme] || THEME_COLORS.light;
+  document.documentElement.style.backgroundColor = color;
+  document.documentElement.style.setProperty("--viewport-bg", color);
+  if (document.body) {
+    document.body.style.backgroundColor = color;
+    document.body.style.setProperty("--viewport-bg", color);
+  }
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", color);
 }
 
 function toggleTheme() {
@@ -2927,6 +2933,12 @@ function isHardResetHotkey(event) {
 function registerServiceWorker() {
   const serviceWorker = globalThis.navigator?.serviceWorker;
   if (!serviceWorker || globalThis.location?.protocol === "file:") return;
+  if (isLocalDevHost(globalThis.location?.hostname || "")) {
+    serviceWorker.getRegistrations?.()
+      ?.then(registrations => Promise.all(registrations.map(registration => registration.unregister())))
+      .catch(() => {});
+    return;
+  }
 
   serviceWorker.addEventListener("controllerchange", () => {
     if (!appUpdateReloadPending) return;
@@ -3020,8 +3032,36 @@ async function hashString(value) {
 
 function reloadForAppUpdate() {
   if (appUpdateReloading) return;
+  if (recentlyReloadedForAppUpdate()) return;
   appUpdateReloading = true;
+  markAppUpdateReload();
   globalThis.location.reload();
+}
+
+function recentlyReloadedForAppUpdate() {
+  try {
+    const previous = Number.parseInt(sessionStorage.getItem(APP_UPDATE_RELOAD_STORAGE_KEY) || "0", 10);
+    return Number.isFinite(previous) && Date.now() - previous < APP_UPDATE_RELOAD_MIN_MS;
+  } catch {
+    return false;
+  }
+}
+
+function markAppUpdateReload() {
+  try {
+    sessionStorage.setItem(APP_UPDATE_RELOAD_STORAGE_KEY, String(Date.now()));
+  } catch {
+    // A reload is still fine if session storage is unavailable.
+  }
+}
+
+function isLocalDevHost(hostname = "") {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".localhost")
+  );
 }
 
 initTheme();

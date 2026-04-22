@@ -1,5 +1,6 @@
 :root {
   color-scheme: light;
+  --viewport-bg: #fbfff8;
   --paper: #fbfff8;
   --paper-bright: #fffffc;
   --ink: #111;
@@ -62,6 +63,7 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --viewport-bg: #10130f;
   --paper: #10130f;
   --paper-bright: #171b15;
   --ink: #f4f0e7;
@@ -128,7 +130,7 @@
 
 html {
   height: 100%;
-  background: var(--paper);
+  background: var(--viewport-bg);
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -138,7 +140,7 @@ body {
   min-height: 100%;
   overflow: hidden;
   overscroll-behavior: none;
-  background: var(--paper);
+  background: var(--viewport-bg);
   color: var(--ink);
   font-family: var(--font);
   font-size: 17px;
