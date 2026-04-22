@@ -72,10 +72,27 @@ let toastTimer = null;
 const homeSyncs = new Map();
 const homeSyncChecks = new Set();
 let inviteInboxInFlight = false;
+let appUpdateFingerprint = "";
+let appUpdateCheckInFlight = false;
+let appUpdateReloadPending = false;
+let appUpdateReloading = false;
 
 const $ = id => document.getElementById(id);
 const canvas = $("board-canvas");
 const ctx = canvas.getContext("2d");
+const APP_UPDATE_FILES = [
+  "./index.html",
+  "./styles.css",
+  "./main.js",
+  "./model.js",
+  "./storage.js",
+  "./sync.js",
+  "./config.js",
+  "./version.js",
+  "./manifest.webmanifest",
+  "./sw.js"
+];
+const APP_UPDATE_CHECK_MS = 30000;
 
 function save() {
   if (game?.id) {
@@ -1988,9 +2005,110 @@ function isHardResetHotkey(event) {
   );
 }
 
+function registerServiceWorker() {
+  const serviceWorker = globalThis.navigator?.serviceWorker;
+  if (!serviceWorker || globalThis.location?.protocol === "file:") return;
+
+  serviceWorker.addEventListener("controllerchange", () => {
+    if (!appUpdateReloadPending) return;
+    reloadForAppUpdate();
+  });
+
+  serviceWorker.register("./sw.js")
+    .then(registration => {
+      registration.addEventListener("updatefound", () => {
+        const worker = registration.installing;
+        worker?.addEventListener("statechange", () => {
+          if (worker.state === "installed" && serviceWorker.controller) {
+            appUpdateReloadPending = true;
+            worker.postMessage({ type: "SKIP_WAITING" });
+          }
+        });
+      });
+
+      if (registration.waiting && serviceWorker.controller) {
+        appUpdateReloadPending = true;
+        registration.waiting.postMessage({ type: "SKIP_WAITING" });
+      }
+
+      startAppUpdateChecks(registration);
+    })
+    .catch(() => {
+      // The app still runs normally when service workers are unavailable.
+    });
+}
+
+function startAppUpdateChecks(registration) {
+  const check = () => checkForAppUpdate(registration);
+  check();
+  setInterval(check, APP_UPDATE_CHECK_MS);
+  window.addEventListener("focus", check);
+  window.addEventListener("online", check);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") check();
+  });
+}
+
+async function checkForAppUpdate(registration) {
+  if (appUpdateCheckInFlight) return;
+  appUpdateCheckInFlight = true;
+
+  try {
+    const fingerprint = await currentAppFingerprint();
+    if (!fingerprint) return;
+
+    if (!appUpdateFingerprint) {
+      appUpdateFingerprint = fingerprint;
+      return;
+    }
+
+    if (fingerprint === appUpdateFingerprint) return;
+    appUpdateFingerprint = fingerprint;
+    appUpdateReloadPending = true;
+    await registration?.update?.();
+
+    if (registration?.waiting) {
+      registration.waiting.postMessage({ type: "SKIP_WAITING" });
+      return;
+    }
+
+    reloadForAppUpdate();
+  } catch {
+    // Offline is normal for an installable app; try again on the next check.
+  } finally {
+    appUpdateCheckInFlight = false;
+  }
+}
+
+async function currentAppFingerprint() {
+  const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const parts = await Promise.all(APP_UPDATE_FILES.map(async path => {
+    const url = new URL(path, globalThis.location.href);
+    url.searchParams.set("update", cacheBust);
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Could not check ${path}`);
+    return `${path}\n${await response.text()}`;
+  }));
+  return hashString(parts.join("\n\n"));
+}
+
+async function hashString(value) {
+  if (!globalThis.crypto?.subtle) return value;
+  const bytes = new TextEncoder().encode(value);
+  const hash = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function reloadForAppUpdate() {
+  if (appUpdateReloading) return;
+  appUpdateReloading = true;
+  globalThis.location.reload();
+}
+
 if (deriveFriendsFromLocalGames()) saveAppState(appState);
 wireEvents();
 renderAll();
+registerServiceWorker();
 if (appState.session?.playerName && appState.linkedGameId) {
   openGame(appState.linkedGameId);
 }

@@ -7,7 +7,7 @@
     "dev:web": "wds --root-dir app --watch --app-index index.html --hostname 127.0.0.1 --port 8031",
     "dev:worker:game": "WRANGLER_LOG_PATH=../../.wrangler/logs wrangler dev --cwd workers/game --config wrangler.toml --ip 0.0.0.0 --port 8799 --inspector-ip 127.0.0.1 --inspector-port 9245 --persist-to ../../.wrangler/state/game",
     "deploy:worker:game": "wrangler deploy --config workers/game/wrangler.toml",
-    "check": "node --check app/config.js && node --check app/version.js && node --check app/model.js && node --check app/storage.js && node --check app/sync.js && node --check app/main.js && node --check workers/game/src/index.js && node -e \"JSON.parse(require('node:fs').readFileSync('app/manifest.webmanifest', 'utf8'))\" && node --test test/*.test.js"
+    "check": "node --check app/config.js && node --check app/version.js && node --check app/model.js && node --check app/storage.js && node --check app/sync.js && node --check app/main.js && node --check app/sw.js && node --check workers/game/src/index.js && node -e \"JSON.parse(require('node:fs').readFileSync('app/manifest.webmanifest', 'utf8'))\" && node --test test/*.test.js"
   },
   "devDependencies": {
     "@web/dev-server": "^0.4.6",
