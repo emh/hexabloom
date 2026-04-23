@@ -1,9 +1,11 @@
 import {
+  BONUS_TYPES,
   DEFAULT_GAME_LENGTH,
   GAME_LENGTHS,
   GLOBAL_ROOM_ID,
   GameRuleError,
   applyMove,
+  bonusCode,
   boardWithPlacements,
   createGameState,
   createId,
@@ -12,6 +14,7 @@ import {
   isGameComplete,
   isWithinBounds,
   joinGame,
+  normalizeWord,
   normalizeRoomId,
   normalizePlayerName,
   orderedPlayers,
@@ -21,6 +24,7 @@ import {
   resetGameState,
   validateMove
 } from "./model.js";
+import { REVERSIBLE_WORDS } from "./reversible.generated.js";
 import { createInitialState, loadAppState, saveAppState } from "./storage.js";
 import { GameSync, deleteRemoteAccount, deleteRemoteGame, fetchPlayerGameRefs, fetchRemoteGameState, joinRemoteGame, remoteGameExists, removeRemotePlayer, resignRemoteGame } from "./sync.js";
 
@@ -116,6 +120,12 @@ const APP_UPDATE_FILES = [
 ];
 const APP_UPDATE_CHECK_MS = 30000;
 
+function localScoreOptions() {
+  return {
+    isReversibleWord: word => REVERSIBLE_WORDS.has(normalizeWord(word))
+  };
+}
+
 function initTheme() {
   applyTheme(resolveTheme());
   const onSystemThemeChange = () => {
@@ -158,7 +168,7 @@ function applyTheme(theme) {
   document.documentElement.style.colorScheme = nextTheme;
   syncViewportTheme(nextTheme);
   updateThemeToggles(nextTheme);
-  if (game && ui.leaderboardOpen) renderLeaderboard();
+  if (game && (ui.leaderboardOpen || ui.historyOpen)) renderLeaderboard();
   if (ui.canvasSize.width && ui.canvasSize.height) scheduleDraw();
 }
 
@@ -453,6 +463,7 @@ function renderAll() {
   const showHome = ui.screen === "home";
   const showGame = ui.screen === null && appState.session && game;
   const showHomeUnderSetup = showSetup && appState.session && ui.nameReturnScreen !== "game";
+  const statsOpen = (ui.leaderboardOpen || ui.historyOpen) && showGame;
   if (showHome) startHomeStreams();
   else stopHomeStreams();
   $("app").hidden = false;
@@ -460,8 +471,7 @@ function renderAll() {
   $("setup-screen").classList.toggle("active", showSetup);
   $("home-screen").classList.toggle("active", showHome || showGame || showHomeUnderSetup);
   $("invite-screen").classList.toggle("active", Boolean(ui.inviteGameId));
-  $("leaderboard-screen").classList.toggle("active", ui.leaderboardOpen && showGame);
-  $("history-screen").classList.toggle("active", ui.historyOpen && showGame);
+  $("leaderboard-screen").classList.toggle("active", statsOpen);
   renderInviteScreen();
   renderConfirmationToast();
 
@@ -470,7 +480,6 @@ function renderAll() {
     ui.historyOpen = false;
     ui.inviteGameId = null;
     $("leaderboard-screen").classList.remove("active");
-    $("history-screen").classList.remove("active");
     $("invite-screen").classList.remove("active");
     document.body.classList.add("no-scroll");
     if (ui.screen === "new-game") renderNewGame();
@@ -482,7 +491,6 @@ function renderAll() {
     ui.leaderboardOpen = false;
     ui.historyOpen = false;
     $("leaderboard-screen").classList.remove("active");
-    $("history-screen").classList.remove("active");
     document.body.classList.add("no-scroll");
     renderHome();
     renderInviteScreen();
@@ -501,7 +509,6 @@ function renderAll() {
   renderTray();
   renderPreview();
   renderLeaderboard();
-  renderHistory();
   queueResizeCanvas();
 }
 
@@ -940,8 +947,6 @@ function renderHud() {
     ${complete ? "<span>·</span><span>complete</span>" : ""}
     <span>·</span>
     <button class="inline-link" type="button" data-action="open-leaderboard">${esc(playerLabel)}</button>
-    <span>·</span>
-    <button class="inline-link" type="button" data-action="open-history">history</button>
   `;
   $("switch-session-btn").textContent = player ? player.name : "join";
   $("switch-session-btn").hidden = false;
@@ -959,8 +964,9 @@ function renderHud() {
 
 function renderLeaderboard() {
   const players = leaderboardPlayers();
+  const entries = moveHistoryEntries();
   const colors = getCanvasTheme();
-  const rows = players.length ? players.map((player, index) => `
+  const playerRows = players.length ? players.map((player, index) => `
     <div class="leaderboard-row">
       <span>${index + 1}</span>
       <strong class="leaderboard-player-name">
@@ -974,53 +980,57 @@ function renderLeaderboard() {
       <span>${player.canRemove ? `<button class="action-link muted leaderboard-remove" type="button" data-action="remove-player" data-player-id="${esc(player.id)}">Remove</button>` : ""}</span>
     </div>
   `).join("") : '<p class="leaderboard-empty">No players yet.</p>';
+  const historyRows = entries.length ? entries.map(entry => `
+    <div class="history-row">
+      <span class="history-index">${entry.index}</span>
+      <strong class="history-words">${renderWordListHtml(entry.displayWords)}</strong>
+      <span class="history-player">${esc(entry.playerName)}</span>
+      <span class="history-bonuses">${entry.bonuses ? esc(entry.bonuses) : "-"}</span>
+      <span class="history-score">${entry.score}</span>
+    </div>
+  `).join("") : '<p class="leaderboard-empty">No words yet.</p>';
 
+  const leaderboardSection = `
+    <section class="overlay-section" aria-labelledby="leaderboard-heading">
+      <div class="overlay-section-header">
+        <h3 id="leaderboard-heading">leaderboard</h3>
+      </div>
+      <div class="leaderboard-table" role="table" aria-label="Leaderboard">
+        <div class="leaderboard-row leaderboard-heading" role="row">
+          <span>#</span>
+          <span>player</span>
+          <span>turns</span>
+          <span>score</span>
+          <span>tiles</span>
+          <span></span>
+        </div>
+        ${playerRows}
+      </div>
+    </section>
+  `;
+  const historySection = `
+    <section class="overlay-section" aria-labelledby="history-heading">
+      <div class="overlay-section-header">
+        <h3 id="history-heading">history</h3>
+      </div>
+      <div class="history-table" role="table" aria-label="Word history">
+        <div class="history-row history-heading" role="row">
+          <span class="history-index">#</span>
+          <span class="history-words">words</span>
+          <span class="history-player">player</span>
+          <span class="history-bonuses">bonuses</span>
+          <span class="history-score">points</span>
+        </div>
+        ${historyRows}
+      </div>
+    </section>
+  `;
   $("leaderboard-content").innerHTML = `
     <div class="overlay-header">
       <h2>leaderboard</h2>
       <button class="action-link muted" type="button" data-action="close-leaderboard">Close</button>
     </div>
-    <div class="leaderboard-table" role="table" aria-label="Leaderboard">
-      <div class="leaderboard-row leaderboard-heading" role="row">
-        <span>#</span>
-        <span>player</span>
-        <span>turns</span>
-        <span>score</span>
-        <span>tiles</span>
-        <span></span>
-      </div>
-      ${rows}
-    </div>
-  `;
-}
-
-function renderHistory() {
-  const entries = moveHistoryEntries();
-  const rows = entries.length ? entries.map(entry => `
-    <div class="history-row">
-      <span>${entry.index}</span>
-      <strong>${esc(entry.primary)}</strong>
-      <span>${esc(entry.playerName)}</span>
-      <span>${entry.additional.length ? esc(entry.additional.join(", ")) : "-"}</span>
-      <span>${entry.score}</span>
-    </div>
-  `).join("") : '<p class="leaderboard-empty">No words yet.</p>';
-
-  $("history-content").innerHTML = `
-    <div class="overlay-header">
-      <h2>history</h2>
-      <button class="action-link muted" type="button" data-action="close-history">Close</button>
-    </div>
-    <div class="history-table" role="table" aria-label="Word history">
-      <div class="history-row history-heading" role="row">
-        <span>#</span>
-        <span>word</span>
-        <span>player</span>
-        <span>also</span>
-        <span>points</span>
-      </div>
-      ${rows}
-    </div>
+    ${leaderboardSection}${historySection}
   `;
 }
 
@@ -1029,12 +1039,13 @@ function moveHistoryEntries() {
     const words = moveWords(move);
     const primaryIndex = primaryWordIndex(move, words);
     const player = game.players?.[move.playerId];
+    const scoreBreakdown = moveScoreBreakdown(move);
 
     return {
       index: index + 1,
-      primary: words[primaryIndex]?.text || "single tile",
-      additional: words.filter((_, wordIndex) => wordIndex !== primaryIndex).map(word => word.text),
+      displayWords: orderedWordsForDisplay(move, words),
       playerName: move.playerName || player?.name || "unknown",
+      bonuses: formatScoreBreakdown(scoreBreakdown, { includeTotal: false, compactCombo: true }),
       score: Math.max(0, Number.parseInt(move.score, 10) || 0)
     };
   }).reverse();
@@ -1045,10 +1056,90 @@ function moveWords(move) {
     ? move.words
       .map(word => ({
         text: String(word?.text || ""),
-        keys: Array.isArray(word?.keys) ? word.keys.map(String) : []
+        keys: Array.isArray(word?.keys) ? word.keys.map(String) : [],
+        bonuses: Array.isArray(word?.bonuses) ? word.bonuses.map(String) : [],
+        reverseText: String(word?.reverseText || "")
       }))
       .filter(word => word.text)
     : [];
+}
+
+function moveScoreBreakdown(move) {
+  const breakdown = move?.scoreBreakdown;
+  return {
+    total: Math.max(0, Number.parseInt(breakdown?.total ?? move?.score, 10) || 0),
+    bonuses: Array.isArray(breakdown?.bonuses) ? breakdown.bonuses.map(String).filter(Boolean) : [],
+    reverseWords: Array.isArray(breakdown?.reverseWords)
+      ? breakdown.reverseWords
+        .map(entry => ({
+          word: String(entry?.word || "").trim(),
+          reverse: String(entry?.reverse || "").trim()
+        }))
+        .filter(entry => entry.word && entry.reverse)
+      : []
+  };
+}
+
+function formatScoreBreakdown(scoreBreakdown, options = {}) {
+  const parts = [];
+  if (options.includeTotal !== false) parts.push(`+${scoreBreakdown.total || 0}`);
+
+  const seen = new Map();
+  for (const bonus of scoreBreakdown.bonuses || []) {
+    const descriptor = describeScoreBonus(bonus, options);
+    if (!seen.has(descriptor.key)) seen.set(descriptor.key, { label: descriptor.label, count: 0 });
+    seen.get(descriptor.key).count += 1;
+  }
+
+  for (const { label, count } of seen.values()) {
+    parts.push(count > 1 ? `${label}x${count}` : label);
+  }
+
+  return parts.join(" · ");
+}
+
+function describeScoreBonus(bonus, options = {}) {
+  const value = String(bonus || "").trim();
+  const comboMatch = /^(?<amount>\+\d+)\s+combo$/i.exec(value);
+  if (comboMatch) {
+    const label = options.compactCombo ? comboMatch.groups.amount : value;
+    return {
+      key: `combo:${comboMatch.groups.amount}`,
+      label
+    };
+  }
+
+  const flatMatch = /^\+\d+$/.exec(value);
+  if (flatMatch) {
+    return {
+      key: `length:${value}`,
+      label: value
+    };
+  }
+
+  return {
+    key: `other:${value}`,
+    label: value
+  };
+}
+
+function orderedWordsForDisplay(move, words) {
+  if (!words.length) return [];
+  const primaryIndex = primaryWordIndex(move, words);
+  if (primaryIndex < 0) return words.slice();
+  return [words[primaryIndex], ...words.filter((_, wordIndex) => wordIndex !== primaryIndex)];
+}
+
+function renderWordListHtml(words = []) {
+  if (!words.length) return esc("single tile");
+  return words.map(renderWordHtml).join('<span class="word-separator">, </span>');
+}
+
+function renderWordHtml(word = {}) {
+  const text = esc(String(word?.text || ""));
+  const reverse = String(word?.reverseText || "").trim();
+  if (!reverse) return text;
+  return `${text}<span class="word-reverse">⇄ ${esc(reverse)}</span>`;
 }
 
 function primaryWordIndex(move, words) {
@@ -1159,13 +1250,18 @@ function renderPreview() {
   const strip = $("preview-strip");
   const message = notice?.message || (complete ? "Game complete" : preview.message);
   const detail = notice?.detail || (complete ? "All joined players used every tile" : preview.detail);
+  const messageHtml = notice
+    ? esc(message)
+    : complete
+      ? esc(message)
+      : (preview.messageHtml || esc(message));
   strip.hidden = !message;
   strip.classList.toggle("valid", Boolean(preview.message && preview.valid));
   strip.classList.toggle("invalid", Boolean(preview.message && !preview.valid));
   strip.classList.toggle("notice", Boolean(notice));
   strip.classList.toggle("complete", Boolean(complete));
   strip.innerHTML = `
-    <span>${esc(message)}</span>
+    <span>${messageHtml}</span>
     <span>${detail ? esc(detail) : ""}</span>
   `;
   $("commit-btn").disabled = !preview.valid || ui.flushing;
@@ -1239,13 +1335,14 @@ function getPreview() {
 
   const move = createMove(player.id, ui.staged, Date.now());
   try {
-    const validation = validateMove(game, move);
+    const validation = validateMove(game, move, localScoreOptions());
     const words = validation.words.map(word => word.text).join(", ");
     return {
       valid: true,
       validation,
       message: words || "Single tile",
-      detail: `+${validation.score}`
+      messageHtml: renderWordListHtml(orderedWordsForDisplay(validation.move, validation.words)),
+      detail: formatScoreBreakdown(validation.scoreBreakdown)
     };
   } catch (error) {
     return {
@@ -1413,9 +1510,18 @@ async function createNewGame() {
   mergeFriends(Object.values(game.players || {}));
   ui.selectedFriendIds.clear();
   ui.shareGameId = game.id;
-  ui.screen = "home";
+  ui.screen = null;
+  ui.leaderboardOpen = false;
+  ui.historyOpen = false;
+  ui.staged = [];
   saveAppState(appState);
   renderAll();
+  if (ui.localOnly) {
+    sync?.stop();
+    sync = null;
+  } else {
+    startSync();
+  }
 }
 
 async function joinGameByCode(codeInput = ui.joinCode) {
@@ -1969,7 +2075,7 @@ function commitStaged() {
   const move = createMove(player.id, ui.staged, Date.now());
 
   try {
-    validateMove(game, move);
+    validateMove(game, move, localScoreOptions());
   } catch (error) {
     toast(error.message || "Move is not valid");
     renderPreview();
@@ -1978,7 +2084,7 @@ function commitStaged() {
 
   if (ui.localOnly) {
     try {
-      const result = applyMove(game, move);
+      const result = applyMove(game, move, localScoreOptions());
       game = storeGame(result.state);
       markGameSeen(game.id);
       ui.staged = [];
@@ -2274,11 +2380,14 @@ function drawGrid(previewKeys, colors) {
         continue;
       }
       const key = hexKey(q, r);
+      const bonusType = game.bonusSpaces?.[key] || "";
+      const bonusStyle = bonusType ? bonusStyleForType(bonusType, colors) : null;
       drawHex(hex, {
-        fill: previewKeys.has(key) ? colors.previewFill : colors.gridFill,
-        stroke: previewKeys.has(key) ? colors.previewStroke : colors.gridStroke,
+        fill: bonusStyle?.fill || (previewKeys.has(key) ? colors.previewFill : colors.gridFill),
+        stroke: previewKeys.has(key) ? colors.previewStroke : bonusStyle?.stroke || colors.gridStroke,
         lineWidth: 1
       });
+      if (bonusStyle) drawBonusLabel(hex, bonusCode(bonusType), bonusStyle.stroke);
     }
   }
 }
@@ -2345,6 +2454,18 @@ function drawHexPath(x, y, radius) {
   ctx.closePath();
 }
 
+function drawBonusLabel(hex, label, color) {
+  if (!label) return;
+  const point = hexToPixel(hex);
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "600 10px 'SF Mono', Menlo, monospace";
+  ctx.fillText(label, point.x, point.y);
+  ctx.restore();
+}
+
 function boardWithStaged() {
   const player = currentPlayer();
   if (!player || !ui.staged.length) return game.board;
@@ -2407,6 +2528,9 @@ function getCanvasTheme() {
     previewStroke: cssColor("--preview-stroke", "rgba(35, 122, 59, 0.42)"),
     hoverFill: cssColor("--hover-fill", "rgba(139, 0, 0, 0.08)"),
     red: cssColor("--red", "#8b0000"),
+    blue: cssColor("--blue", "#005eb8"),
+    teal: cssColor("--teal", "#4e7785"),
+    gold: cssColor("--gold", "#9a6a00"),
     tileFace: cssColor("--tile-face", "#fffffc"),
     tileText: cssColor("--tile-text", "#111"),
     tileSubtext: cssColor("--tile-subtext", "rgba(17, 17, 17, 0.62)"),
@@ -2417,6 +2541,22 @@ function getCanvasTheme() {
     otherPlayer: cssColor("--other-player", "#d55e00"),
     otherPlayers: cssColorList("--other-player-colors", ["#d55e00"])
   };
+}
+
+function bonusStyleForType(type, colors) {
+  if (type === BONUS_TYPES.DOUBLE_LETTER) {
+    return { fill: colorToRgba(colors.blue, 0.12), stroke: colors.blue };
+  }
+  if (type === BONUS_TYPES.TRIPLE_LETTER) {
+    return { fill: colorToRgba(colors.teal, 0.16), stroke: colors.teal };
+  }
+  if (type === BONUS_TYPES.DOUBLE_WORD) {
+    return { fill: colorToRgba(colors.gold, 0.14), stroke: colors.gold };
+  }
+  if (type === BONUS_TYPES.TRIPLE_WORD) {
+    return { fill: colorToRgba(colors.red, 0.14), stroke: colors.red };
+  }
+  return null;
 }
 
 function cssColor(name, fallback) {
@@ -2789,12 +2929,6 @@ function wireEvents() {
       ui.historyOpen = false;
       renderAll();
     }
-
-    if (action === "open-history") {
-      ui.historyOpen = true;
-      ui.leaderboardOpen = false;
-      renderAll();
-    }
   });
 
   $("leaderboard-screen").addEventListener("click", event => {
@@ -2807,13 +2941,6 @@ function wireEvents() {
 
     if (action === "close-leaderboard" || event.target.id === "leaderboard-screen") {
       ui.leaderboardOpen = false;
-      renderAll();
-    }
-  });
-
-  $("history-screen").addEventListener("click", event => {
-    const action = event.target.closest("[data-action]")?.dataset.action;
-    if (action === "close-history" || event.target.id === "history-screen") {
       ui.historyOpen = false;
       renderAll();
     }

@@ -10,6 +10,13 @@ export const GAME_LENGTHS = Object.freeze({
   long: Object.freeze({ key: "long", label: "Long", tileBagCount: 5 })
 });
 
+export const BONUS_TYPES = Object.freeze({
+  DOUBLE_LETTER: "double-letter",
+  TRIPLE_LETTER: "triple-letter",
+  DOUBLE_WORD: "double-word",
+  TRIPLE_WORD: "triple-word"
+});
+
 export const DIRECTIONS = [
   { q: 1, r: 0 },
   { q: 1, r: -1 },
@@ -243,6 +250,8 @@ export function createGameState(input = {}) {
   const tileBagCount = normalizeTileBagCount(
     input.tileBagCount ?? input.bagCount ?? GAME_LENGTHS[normalizeGameLength(input.gameLength)].tileBagCount
   );
+  const createdAt = typeof input.createdAt === "string" ? input.createdAt : new Date().toISOString();
+  const updatedAt = typeof input.updatedAt === "string" ? input.updatedAt : createdAt;
 
   if (input.players && typeof input.players === "object") {
     for (const player of Object.values(input.players)) {
@@ -252,6 +261,13 @@ export function createGameState(input = {}) {
   }
 
   const ownerId = normalizeOwnerId(input.ownerId, players);
+  const bounds = recomputeBoardBounds(board);
+  const bonusSeed = normalizeBonusSeed(input.bonusSeed, input.id, createdAt);
+  const hasStoredBonusSpaces = Object.prototype.hasOwnProperty.call(input || {}, "bonusSpaces");
+  const bonusSpaces = normalizeBonusSpaces(input.bonusSpaces, board, bounds);
+  if (!hasStoredBonusSpaces && !Object.keys(board).length) {
+    Object.assign(bonusSpaces, generateBonusSpacesForBounds(bounds, board, bonusSeed));
+  }
 
   return {
     id: normalizeRoomId(input.id),
@@ -259,12 +275,14 @@ export function createGameState(input = {}) {
     tileBagCount,
     gameLength: gameLengthFromTileBagCount(tileBagCount),
     board,
+    bonusSeed,
+    bonusSpaces,
     players,
     removedPlayers,
     moves: Array.isArray(input.moves) ? input.moves.map(normalizeMoveRecord).filter(Boolean) : [],
-    bounds: recomputeBoardBounds(board),
-    createdAt: typeof input.createdAt === "string" ? input.createdAt : new Date().toISOString(),
-    updatedAt: typeof input.updatedAt === "string" ? input.updatedAt : new Date().toISOString()
+    bounds,
+    createdAt,
+    updatedAt
   };
 }
 
@@ -291,6 +309,7 @@ export function resetGameState(inputState, options = {}) {
     id: state.id,
     ownerId: state.ownerId,
     tileBagCount: state.tileBagCount,
+    bonusSeed: createId(),
     players,
     removedPlayers: state.removedPlayers,
     createdAt: state.createdAt,
@@ -317,7 +336,12 @@ export function joinGame(inputState, input = {}) {
 
   if (isGameComplete(state)) throw new GameRuleError("Game is complete");
 
-  const player = createPlayer({ id, name, tileBagCount: state.tileBagCount });
+  const player = createPlayer({
+    id,
+    name,
+    tileBagCount: state.tileBagCount,
+    seed: playerSeedForGame(state, id)
+  });
   state.players[player.id] = player;
   if (!state.ownerId) state.ownerId = player.id;
   state.updatedAt = new Date().toISOString();
@@ -365,6 +389,7 @@ export function applyMove(inputState, inputMove, options = {}) {
   const validation = validateMove(state, inputMove, options);
   const player = state.players[validation.move.playerId];
   const usedTileIds = new Set(validation.move.placements.map(placement => placement.tileId));
+  const previousBounds = state.bounds;
 
   for (const placement of validation.move.placements) {
     const tile = validation.tilesById.get(placement.tileId);
@@ -393,12 +418,24 @@ export function applyMove(inputState, inputMove, options = {}) {
     words: validation.words.map(word => ({
       text: word.text,
       value: word.value,
-      keys: word.keys
-    }))
+      keys: word.keys,
+      score: word.score,
+      bonuses: word.bonuses,
+      reverseText: word.reverseText
+    })),
+    scoreBreakdown: validation.scoreBreakdown
   };
 
   state.moves.push(moveRecord);
   state.bounds = recomputeBoardBounds(state.board);
+  state.bonusSpaces = advanceBonusSpaces(
+    state.bonusSpaces,
+    validation.move.placements,
+    state.board,
+    previousBounds,
+    state.bounds,
+    state.bonusSeed
+  );
   state.updatedAt = new Date().toISOString();
 
   return {
@@ -406,6 +443,7 @@ export function applyMove(inputState, inputMove, options = {}) {
     move: moveRecord,
     words: validation.words,
     score: validation.score,
+    scoreBreakdown: validation.scoreBreakdown,
     accepted: true,
     duplicate: false
   };
@@ -457,14 +495,15 @@ export function validateMove(inputState, inputMove, options = {}) {
 
   validateDictionaryWords(words, options);
 
-  const score = scoreWords(words, move.placements, tilesById);
+  const scoring = scoreMove(words, move.placements, tilesById, state.bonusSpaces, options);
 
   return {
     move,
     player,
     axis,
-    words,
-    score,
+    words: scoring.words,
+    score: scoring.score,
+    scoreBreakdown: scoring.scoreBreakdown,
     tilesById,
     draftBoard
   };
@@ -683,7 +722,8 @@ function normalizeMoveRecord(input = {}) {
     ...normalizeMove(input),
     playerName: normalizePlayerName(input.playerName),
     score: Math.max(0, Number.parseInt(input.score, 10) || 0),
-    words: Array.isArray(input.words) ? input.words : []
+    words: Array.isArray(input.words) ? input.words.map(normalizeMoveWordRecord).filter(Boolean) : [],
+    scoreBreakdown: normalizeScoreBreakdown(input.scoreBreakdown, input.score)
   };
 }
 
@@ -774,9 +814,243 @@ function normalizeLetter(value) {
   return /^[A-Z]$/.test(letter) ? letter : "";
 }
 
-function scoreWords(words, placements, tilesById) {
-  if (words.length) return words.reduce((sum, word) => sum + word.value, 0);
-  return placements.reduce((sum, placement) => sum + (tilesById.get(placement.tileId)?.value || 0), 0);
+export function bonusCode(type) {
+  if (type === BONUS_TYPES.DOUBLE_LETTER) return "2L";
+  if (type === BONUS_TYPES.TRIPLE_LETTER) return "3L";
+  if (type === BONUS_TYPES.DOUBLE_WORD) return "2W";
+  if (type === BONUS_TYPES.TRIPLE_WORD) return "3W";
+  return "";
+}
+
+function normalizeBonusSeed(value, gameId, createdAt) {
+  const seed = String(value || `${normalizeRoomId(gameId)}:${createdAt}`).trim();
+  return seed || `BOARD:${createdAt}`;
+}
+
+function playerSeedForGame(state, playerId) {
+  return `${normalizeRoomId(state?.id)}:${state?.createdAt || ""}:${String(playerId || "").trim()}`;
+}
+
+function normalizeBonusSpaces(input = {}, board = {}, bounds = initialBounds()) {
+  const bonusSpaces = {};
+  if (!input || typeof input !== "object") return bonusSpaces;
+
+  for (const [rawKey, rawValue] of Object.entries(input)) {
+    const { q, r } = parseHexKey(rawKey);
+    if (!Number.isInteger(q) || !Number.isInteger(r)) continue;
+    const key = hexKey(q, r);
+    if (board[key]) continue;
+    if (!isWithinBounds({ q, r }, bounds)) continue;
+
+    const type = normalizeBonusType(rawValue?.type ?? rawValue);
+    if (!type) continue;
+    bonusSpaces[key] = type;
+  }
+
+  return bonusSpaces;
+}
+
+function normalizeBonusType(value) {
+  const type = String(value || "").trim().toLowerCase();
+  if (type === BONUS_TYPES.DOUBLE_LETTER) return BONUS_TYPES.DOUBLE_LETTER;
+  if (type === BONUS_TYPES.TRIPLE_LETTER) return BONUS_TYPES.TRIPLE_LETTER;
+  if (type === BONUS_TYPES.DOUBLE_WORD) return BONUS_TYPES.DOUBLE_WORD;
+  if (type === BONUS_TYPES.TRIPLE_WORD) return BONUS_TYPES.TRIPLE_WORD;
+  return "";
+}
+
+function generateBonusSpacesForBounds(bounds, board, bonusSeed, previousBounds = null) {
+  const bonusSpaces = {};
+
+  for (let q = bounds.minQ; q <= bounds.maxQ; q += 1) {
+    for (let r = bounds.minR; r <= bounds.maxR; r += 1) {
+      const hex = { q, r };
+      if (!isWithinBounds(hex, bounds)) continue;
+      if (previousBounds && isWithinBounds(hex, previousBounds)) continue;
+
+      const key = hexKey(q, r);
+      if (board[key]) continue;
+
+      const type = rollBonusType(key, bonusSeed);
+      if (!type) continue;
+      bonusSpaces[key] = type;
+    }
+  }
+
+  return bonusSpaces;
+}
+
+function rollBonusType(key, bonusSeed) {
+  const roll = hashString(`${bonusSeed}:${key}`) % 1000;
+  if (roll < 925) return "";
+  if (roll < 965) return BONUS_TYPES.DOUBLE_LETTER;
+  if (roll < 985) return BONUS_TYPES.TRIPLE_LETTER;
+  if (roll < 995) return BONUS_TYPES.DOUBLE_WORD;
+  return BONUS_TYPES.TRIPLE_WORD;
+}
+
+function advanceBonusSpaces(currentBonusSpaces = {}, placements, board, previousBounds, nextBounds, bonusSeed) {
+  const nextBonusSpaces = { ...(currentBonusSpaces || {}) };
+
+  for (const placement of placements) {
+    delete nextBonusSpaces[hexKey(placement.q, placement.r)];
+  }
+
+  Object.assign(nextBonusSpaces, generateBonusSpacesForBounds(nextBounds, board, bonusSeed, previousBounds));
+  return normalizeBonusSpaces(nextBonusSpaces, board, nextBounds);
+}
+
+function scoreMove(words, placements, tilesById, bonusSpaces = {}, options = {}) {
+  if (words.length) {
+    const placementKeys = new Set(placements.map(placement => hexKey(placement.q, placement.r)));
+    const scoredWords = words.map(word => scoreWord(word, placementKeys, bonusSpaces, options));
+    const multiWordBonus = multiWordPlayBonus(scoredWords.length);
+    const bonuses = scoredWords.flatMap(word => word.bonuses);
+    if (multiWordBonus) bonuses.push(`+${multiWordBonus} combo`);
+
+    const score = scoredWords.reduce((sum, word) => sum + word.score, 0) + multiWordBonus;
+    return {
+      words: scoredWords,
+      score,
+      scoreBreakdown: {
+        total: score,
+        multiWordBonus,
+        bonuses,
+        reverseWords: scoredWords
+          .filter(word => word.reverseText)
+          .map(word => ({ word: word.text, reverse: word.reverseText }))
+      }
+    };
+  }
+
+  const placement = placements[0];
+  const key = placement ? hexKey(placement.q, placement.r) : "";
+  const tile = placement ? tilesById.get(placement.tileId) : null;
+  const bonusType = key ? normalizeBonusType(bonusSpaces[key]) : "";
+  const bonuses = [];
+  let score = tile?.value || 0;
+
+  if (bonusType) {
+    bonuses.push(bonusCode(bonusType));
+    score *= bonusMultiplier(bonusType);
+  }
+
+  return {
+    words: [],
+    score,
+    scoreBreakdown: {
+      total: score,
+      multiWordBonus: 0,
+      bonuses,
+      reverseWords: []
+    }
+  };
+}
+
+function scoreWord(word, placementKeys, bonusSpaces, options) {
+  let letterScore = 0;
+  let wordMultiplier = 1;
+  const bonuses = [];
+
+  for (const cell of word.cells) {
+    const cellValue = Number(cell.value) || LETTER_VALUES[cell.letter] || 1;
+    const bonusType = placementKeys.has(cell.key) ? normalizeBonusType(bonusSpaces[cell.key]) : "";
+    let scoredLetter = cellValue;
+
+    if (bonusType) bonuses.push(bonusCode(bonusType));
+    if (bonusType === BONUS_TYPES.DOUBLE_LETTER || bonusType === BONUS_TYPES.TRIPLE_LETTER) {
+      scoredLetter *= bonusMultiplier(bonusType);
+    }
+    if (bonusType === BONUS_TYPES.DOUBLE_WORD || bonusType === BONUS_TYPES.TRIPLE_WORD) {
+      wordMultiplier *= bonusMultiplier(bonusType);
+    }
+
+    letterScore += scoredLetter;
+  }
+
+  let score = letterScore * wordMultiplier;
+  const longWordBonus = longWordPlayBonus(word.text.length);
+  if (longWordBonus) {
+    bonuses.push(`+${longWordBonus}`);
+    score += longWordBonus;
+  }
+
+  const reverseText = reverseWordMatch(word.text, options);
+  if (reverseText) score *= 2;
+
+  return {
+    ...word,
+    score,
+    bonuses,
+    reverseText
+  };
+}
+
+function bonusMultiplier(type) {
+  if (type === BONUS_TYPES.DOUBLE_LETTER || type === BONUS_TYPES.DOUBLE_WORD) return 2;
+  if (type === BONUS_TYPES.TRIPLE_LETTER || type === BONUS_TYPES.TRIPLE_WORD) return 3;
+  return 1;
+}
+
+function longWordPlayBonus(length) {
+  return length >= 5 ? 2 ** (length - 5) : 0;
+}
+
+function multiWordPlayBonus(wordCount) {
+  return wordCount >= 2 ? 2 ** (wordCount - 2) : 0;
+}
+
+function reverseWordMatch(text, options = {}) {
+  const word = normalizeWord(text);
+  if (word.length < 2) return "";
+
+  const reversed = [...word].reverse().join("");
+  if (typeof options.getReverseWord === "function") {
+    const match = normalizeWord(options.getReverseWord(word, reversed));
+    return match || "";
+  }
+  if (typeof options.isReversibleWord === "function") {
+    return options.isReversibleWord(word, reversed) ? reversed : "";
+  }
+  if (typeof options.isWordAllowed === "function") {
+    return options.isWordAllowed(reversed) ? reversed : "";
+  }
+  return "";
+}
+
+function normalizeMoveWordRecord(input = {}) {
+  const text = String(input?.text || "").trim();
+  if (!text) return null;
+  return {
+    text,
+    value: Math.max(0, Number.parseInt(input?.value, 10) || 0),
+    keys: Array.isArray(input?.keys) ? input.keys.map(String) : [],
+    score: Math.max(0, Number.parseInt(input?.score, 10) || 0),
+    bonuses: Array.isArray(input?.bonuses)
+      ? input.bonuses.map(value => String(value || "").trim()).filter(Boolean)
+      : [],
+    reverseText: normalizeWord(input?.reverseText || input?.reverse)
+  };
+}
+
+function normalizeScoreBreakdown(input = {}, fallbackScore = 0) {
+  return {
+    total: Math.max(0, Number.parseInt(input?.total, 10) || Number.parseInt(fallbackScore, 10) || 0),
+    multiWordBonus: Math.max(0, Number.parseInt(input?.multiWordBonus, 10) || 0),
+    bonuses: Array.isArray(input?.bonuses)
+      ? input.bonuses.map(value => String(value || "").trim()).filter(Boolean)
+      : [],
+    reverseWords: Array.isArray(input?.reverseWords)
+      ? input.reverseWords.map(normalizeReverseWordRecord).filter(Boolean)
+      : []
+  };
+}
+
+function normalizeReverseWordRecord(input = {}) {
+  const word = normalizeWord(input?.word);
+  const reverse = normalizeWord(input?.reverse);
+  if (!word || !reverse) return null;
+  return { word, reverse };
 }
 
 function validateDictionaryWords(words, options = {}) {

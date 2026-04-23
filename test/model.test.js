@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  BONUS_TYPES,
   GameRuleError,
   LETTER_DISTRIBUTION,
   applyMove,
@@ -26,6 +27,7 @@ function gameWithPlayers() {
   let game = createGameState({ id: "TEST01" });
   game = joinGame(game, { playerId: "p1", name: "Ada" }).state;
   game = joinGame(game, { playerId: "p2", name: "Ben" }).state;
+  game.bonusSpaces = {};
   return game;
 }
 
@@ -148,6 +150,55 @@ test("dictionary validation checks every word formed across all three axes", () 
 
   const valid = validateMove(game, move, allowWords(["CAT", "HAT", "BAD"]));
   assert.deepEqual(valid.words.map(word => word.text).sort(), ["BAD", "CAT", "HAT"]);
+  assert.equal(valid.score, 11);
+  assert.deepEqual(valid.scoreBreakdown.bonuses, ["+2 combo"]);
+});
+
+test("long words, reverse words, and board bonuses all affect scoring", () => {
+  const game = gameWithPlayers();
+  forceRack(game, "p1", ["D", "O", "G", "M", "O", "N", "S", "T", "E", "R"]);
+  game.bonusSpaces = {
+    "0,0": BONUS_TYPES.DOUBLE_LETTER,
+    "2,0": BONUS_TYPES.DOUBLE_WORD
+  };
+
+  const reverseMove = validateMove(game, createMove("p1", [
+    { q: 0, r: 0, tileId: "p1-0" },
+    { q: 1, r: 0, tileId: "p1-1" },
+    { q: 2, r: 0, tileId: "p1-2" }
+  ], 100), allowWords(["DOG", "GOD"]));
+
+  assert.equal(reverseMove.score, 16);
+  assert.deepEqual(reverseMove.scoreBreakdown.bonuses, ["2L", "2W"]);
+  assert.deepEqual(reverseMove.scoreBreakdown.reverseWords, [{ word: "DOG", reverse: "GOD" }]);
+
+  game.bonusSpaces = {};
+  const longWord = validateMove(game, createMove("p1", [
+    { q: -3, r: 0, tileId: "p1-3" },
+    { q: -2, r: 0, tileId: "p1-4" },
+    { q: -1, r: 0, tileId: "p1-5" },
+    { q: 0, r: 0, tileId: "p1-6" },
+    { q: 1, r: 0, tileId: "p1-7" },
+    { q: 2, r: 0, tileId: "p1-8" },
+    { q: 3, r: 0, tileId: "p1-9" }
+  ], 101));
+
+  assert.equal(longWord.words[0].text, "MONSTER");
+  assert.equal(longWord.score, 11);
+  assert.deepEqual(longWord.scoreBreakdown.bonuses, ["+4"]);
+});
+
+test("new games seed bonus spaces, but existing boards do not reveal old ones", () => {
+  const fresh = createGameState({ id: "BONUS1" });
+  const migrated = createGameState({
+    id: "BONUS2",
+    board: {
+      "0,0": { q: 0, r: 0, letter: "A", value: 1, playerId: "p1", tileId: "a", timestamp: 1 }
+    }
+  });
+
+  assert.ok(Object.keys(fresh.bonusSpaces).length > 0);
+  assert.deepEqual(migrated.bonusSpaces, {});
 });
 
 test("createPlayer deals eleven rack tiles and a remaining bag", () => {
@@ -167,6 +218,33 @@ test("game length controls how many tile bags each player receives", () => {
   const reset = resetGameState(game, { seed: "medium-reset" });
   assert.equal(reset.tileBagCount, 3);
   assert.equal(reset.players.p1.remainingBag.length, TILES_PER_BAG * 3 - 11);
+});
+
+test("opening rack is deterministic per game, not per player across all games", () => {
+  const gameA1 = joinGame(createGameState({
+    id: "GAMEA1",
+    createdAt: "2026-01-01T00:00:00.000Z"
+  }), {
+    playerId: "p1",
+    name: "Ada"
+  }).player;
+  const gameA2 = joinGame(createGameState({
+    id: "GAMEA1",
+    createdAt: "2026-01-01T00:00:00.000Z"
+  }), {
+    playerId: "p1",
+    name: "Ada"
+  }).player;
+  const gameB = joinGame(createGameState({
+    id: "GAMEB1",
+    createdAt: "2026-01-01T00:00:00.000Z"
+  }), {
+    playerId: "p1",
+    name: "Ada"
+  }).player;
+
+  assert.deepEqual(gameA1.rack.map(tile => tile.letter), gameA2.rack.map(tile => tile.letter));
+  assert.notDeepEqual(gameA1.rack.map(tile => tile.letter), gameB.rack.map(tile => tile.letter));
 });
 
 test("game is complete when every joined player has used all tiles", () => {

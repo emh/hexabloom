@@ -763,8 +763,7 @@ body.no-scroll {
   z-index: 125;
 }
 
-.leaderboard-overlay,
-.history-overlay {
+.leaderboard-overlay {
   z-index: 130;
 }
 
@@ -792,8 +791,7 @@ body.no-scroll {
 }
 
 .invite-overlay,
-.leaderboard-overlay,
-.history-overlay {
+.leaderboard-overlay {
   background: transparent;
 }
 
@@ -803,13 +801,8 @@ body.no-scroll {
   padding: calc(48px + env(safe-area-inset-top, 0)) 24px calc(60px + env(safe-area-inset-bottom, 0));
 }
 
-.history-content {
-  max-width: 860px;
-}
-
 .invite-content,
-.leaderboard-content,
-.history-content {
+.leaderboard-content {
   width: min(640px, calc(100% - 36px));
   margin-top: calc(24px + env(safe-area-inset-top, 0));
   margin-bottom: calc(24px + env(safe-area-inset-bottom, 0));
@@ -820,7 +813,7 @@ body.no-scroll {
   box-shadow: var(--panel-shadow);
 }
 
-.history-content {
+.leaderboard-content {
   width: min(860px, calc(100% - 36px));
 }
 
@@ -1146,6 +1139,27 @@ body.no-scroll {
   line-height: 1;
 }
 
+.overlay-section + .overlay-section {
+  margin-top: 32px;
+}
+
+.overlay-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.overlay-section-header h3 {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .leaderboard-table {
   border-top: 1px solid var(--rule);
 }
@@ -1238,7 +1252,7 @@ body.no-scroll {
 
 .history-row {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) minmax(80px, 0.8fr) minmax(0, 1.25fr) 64px;
+  grid-template-columns: 32px minmax(0, 1.35fr) minmax(80px, 0.75fr) minmax(0, 1fr) 64px;
   gap: 12px;
   align-items: baseline;
   padding: 11px 0;
@@ -1264,6 +1278,28 @@ body.no-scroll {
   line-height: 1.15;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.word-separator {
+  color: var(--ink-light);
+}
+
+.word-reverse {
+  margin-left: 0.45em;
+  color: var(--teal);
+  font-family: var(--mono);
+  font-size: 0.7em;
+  font-weight: 600;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.preview-strip .word-reverse {
+  color: var(--green);
+}
+
+.history-score {
+  text-align: right;
 }
 
 .history-heading {
@@ -1529,12 +1565,42 @@ body.no-scroll {
   }
 
   .history-row {
-    grid-template-columns: 26px minmax(0, 1fr) minmax(58px, 0.8fr) minmax(0, 1fr) 42px;
-    gap: 8px;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) auto;
+    grid-template-areas:
+      "player bonuses score"
+      "words words words";
+    gap: 5px 8px;
+    align-items: start;
+  }
+
+  .history-heading {
+    display: none;
+  }
+
+  .history-index {
+    display: none;
+  }
+
+  .history-player {
+    grid-area: player;
+  }
+
+  .history-bonuses {
+    grid-area: bonuses;
+  }
+
+  .history-score {
+    grid-area: score;
+  }
+
+  .history-words {
+    grid-area: words;
   }
 
   .history-row strong {
     font-size: 18px;
+    white-space: normal;
+    text-overflow: clip;
   }
 }
 
