@@ -287,6 +287,40 @@ export async function fetchPlayerGameRefs(playerId, settings = loadSettings()) {
   };
 }
 
+export async function createRemoteLinkCode({ playerId, name, gameId = "", gameIds = [] }, settings = loadSettings()) {
+  if (!settings.apiBaseUrl) throw syncUnavailableError();
+  const response = await fetch(getLinkEndpoint(settings.apiBaseUrl), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      playerId,
+      name,
+      gameId: normalizeRoomId(gameId),
+      gameIds: Array.isArray(gameIds) ? gameIds.map(normalizeRoomId).filter(Boolean) : []
+    })
+  });
+
+  if (!response.ok) throw await responseError(response);
+  return await response.json();
+}
+
+export async function redeemRemoteLinkCode({ code }, settings = loadSettings()) {
+  if (!settings.apiBaseUrl) throw syncUnavailableError();
+  const response = await fetch(getLinkEndpoint(settings.apiBaseUrl, "/redeem"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: normalizeLinkCodeInput(code) })
+  });
+
+  if (!response.ok) throw await responseError(response);
+  const payload = await response.json();
+  return {
+    ...payload,
+    gameId: normalizeRoomId(payload?.gameId),
+    gameIds: Array.isArray(payload?.gameIds) ? payload.gameIds.map(normalizeRoomId).filter(Boolean) : []
+  };
+}
+
 function getEndpoint(apiBaseUrl, path) {
   const base = apiBaseUrl.replace(/\/+$/, "");
   return new URL(path, `${base}/`).toString();
@@ -294,6 +328,10 @@ function getEndpoint(apiBaseUrl, path) {
 
 function getPlayerEndpoint(apiBaseUrl, playerId, path) {
   return getEndpoint(apiBaseUrl, `/player/${encodeURIComponent(String(playerId || ""))}${path}`);
+}
+
+function getLinkEndpoint(apiBaseUrl, path = "") {
+  return getEndpoint(apiBaseUrl, `/link${path}`);
 }
 
 function getGameEndpoint(apiBaseUrl, roomId, path) {
@@ -325,4 +363,14 @@ async function responseError(response) {
   const error = new Error(message);
   error.status = response.status;
   return error;
+}
+
+function syncUnavailableError() {
+  const error = new Error("Sync is unavailable");
+  error.status = 503;
+  return error;
+}
+
+function normalizeLinkCodeInput(value) {
+  return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }

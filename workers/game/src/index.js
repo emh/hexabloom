@@ -3,10 +3,14 @@ import { DICTIONARY_WORDS } from "./dictionary.generated.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_SYNC_CACHE_TTL_DAYS = 30;
+const DEFAULT_LINK_CODE_TTL_HOURS = 24;
 const GAME_STORAGE_KEY = "game";
 const CACHE_META_STORAGE_KEY = "cacheMeta";
 const INBOX_STORAGE_KEY = "inboxes";
 const USERS_STORAGE_KEY = "users";
+const LINK_CODES_STORAGE_KEY = "linkCodes";
+const LINK_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const LINK_CODE_LENGTH = 8;
 
 const MOVE_VALIDATION = {
   isWordAllowed: word => DICTIONARY_WORDS.has(normalizeWord(word))
@@ -398,19 +402,23 @@ export class InviteInbox {
     this.env = env;
     this.inboxes = null;
     this.users = null;
+    this.linkCodes = null;
     this.ready = this.initialize();
   }
 
   async initialize() {
-    const [inboxes, users] = await Promise.all([
+    const [inboxes, users, linkCodes] = await Promise.all([
       this.state.storage.get(INBOX_STORAGE_KEY),
-      this.state.storage.get(USERS_STORAGE_KEY)
+      this.state.storage.get(USERS_STORAGE_KEY),
+      this.state.storage.get(LINK_CODES_STORAGE_KEY)
     ]);
     this.inboxes = normalizeStoredInboxes(inboxes, this.env);
     this.users = normalizeStoredUsers(users, this.inboxes);
+    this.linkCodes = normalizeStoredLinkCodes(linkCodes, this.env);
     await Promise.all([
       this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
-      this.state.storage.put(USERS_STORAGE_KEY, this.users)
+      this.state.storage.put(USERS_STORAGE_KEY, this.users),
+      this.state.storage.put(LINK_CODES_STORAGE_KEY, this.linkCodes)
     ]);
     await this.sweepExpiredRefs();
   }
@@ -430,45 +438,60 @@ export class InviteInbox {
     const url = new URL(request.url);
     await this.sweepExpiredRefs();
 
-    if ((url.pathname === "/internal/games" || url.pathname === "/internal/invite") && request.method === "POST") {
-      const body = await readJson(request);
-      await this.addGameRefs(body);
-      return json({ ok: true }, 200, cors);
+    try {
+      if ((url.pathname === "/internal/games" || url.pathname === "/internal/invite") && request.method === "POST") {
+        const body = await readJson(request);
+        await this.addGameRefs(body);
+        return json({ ok: true }, 200, cors);
+      }
+
+      if (url.pathname === "/internal/admin/users" && request.method === "GET") {
+        return json({ users: this.listUsers() }, 200, cors);
+      }
+
+      const removeGameRefMatch = /^\/internal\/games\/([A-Za-z0-9]+)\/players\/([^/]+)\/?$/.exec(url.pathname);
+      if (removeGameRefMatch && (request.method === "DELETE" || request.method === "POST")) {
+        const result = await this.removeGameRef(removeGameRefMatch[1], decodeURIComponent(removeGameRefMatch[2]));
+        return json(result, 200, cors);
+      }
+
+      const removeGameRefsMatch = /^\/internal\/games\/([A-Za-z0-9]+)\/?$/.exec(url.pathname);
+      if (removeGameRefsMatch && (request.method === "DELETE" || request.method === "POST")) {
+        const result = await this.removeGameRefs(removeGameRefsMatch[1]);
+        return json(result, 200, cors);
+      }
+
+      const linkRoute = parseLinkRoute(url.pathname);
+      if (linkRoute?.action === "create" && request.method === "POST") {
+        const body = await readJson(request).catch(() => ({}));
+        return json(await this.createLinkCode(body), 200, cors);
+      }
+
+      if (linkRoute?.action === "redeem" && request.method === "POST") {
+        const body = await readJson(request).catch(() => ({}));
+        return json(await this.redeemLinkCode(body), 200, cors);
+      }
+
+      const route = parsePlayerRoute(url.pathname);
+      if (!route) return json({ error: "Not found" }, 404, cors);
+
+      if (route.action === "games" && request.method === "GET") {
+        return json({ games: this.playerGames(route.playerId) }, 200, cors);
+      }
+
+      if (route.action === "invites" && request.method === "GET") {
+        return json({ invites: this.playerGames(route.playerId) }, 200, cors);
+      }
+
+      if (route.action === "delete" && (request.method === "DELETE" || request.method === "POST")) {
+        const body = await readJson(request).catch(() => ({}));
+        return json(await this.deletePlayer(route.playerId, body), 200, cors);
+      }
+
+      return json({ error: "Not found" }, 404, cors);
+    } catch (error) {
+      return json({ error: messageFromError(error) }, error?.status || 400, cors);
     }
-
-    if (url.pathname === "/internal/admin/users" && request.method === "GET") {
-      return json({ users: this.listUsers() }, 200, cors);
-    }
-
-    const removeGameRefMatch = /^\/internal\/games\/([A-Za-z0-9]+)\/players\/([^/]+)\/?$/.exec(url.pathname);
-    if (removeGameRefMatch && (request.method === "DELETE" || request.method === "POST")) {
-      const result = await this.removeGameRef(removeGameRefMatch[1], decodeURIComponent(removeGameRefMatch[2]));
-      return json(result, 200, cors);
-    }
-
-    const removeGameRefsMatch = /^\/internal\/games\/([A-Za-z0-9]+)\/?$/.exec(url.pathname);
-    if (removeGameRefsMatch && (request.method === "DELETE" || request.method === "POST")) {
-      const result = await this.removeGameRefs(removeGameRefsMatch[1]);
-      return json(result, 200, cors);
-    }
-
-    const route = parsePlayerRoute(url.pathname);
-    if (!route) return json({ error: "Not found" }, 404, cors);
-
-    if (route.action === "games" && request.method === "GET") {
-      return json({ games: this.playerGames(route.playerId) }, 200, cors);
-    }
-
-    if (route.action === "invites" && request.method === "GET") {
-      return json({ invites: this.playerGames(route.playerId) }, 200, cors);
-    }
-
-    if (route.action === "delete" && (request.method === "DELETE" || request.method === "POST")) {
-      const body = await readJson(request).catch(() => ({}));
-      return json(await this.deletePlayer(route.playerId, body), 200, cors);
-    }
-
-    return json({ error: "Not found" }, 404, cors);
   }
 
   async addGameRefs(input = {}) {
@@ -515,6 +538,86 @@ export class InviteInbox {
   playerGames(playerId) {
     const inbox = this.inboxes[normalizePlayerId(playerId)] || {};
     return Object.values(inbox).sort((left, right) => Date.parse(right.updatedAt || right.invitedAt || "") - Date.parse(left.updatedAt || left.invitedAt || ""));
+  }
+
+  async createLinkCode(input = {}) {
+    const playerId = normalizePlayerId(input.playerId || input.id);
+    if (!playerId) throw statusError("Player ID is required", 400);
+
+    const user = this.userSummary(playerId);
+    const playerName = normalizePlayerName(input.name || input.playerName) || user?.name || "Player";
+    const gameId = normalizeRoomId(input.gameId || input.roomId);
+    const gameIds = normalizeGameIds([
+      gameId,
+      ...normalizeGameIds(input.gameIds),
+      ...this.playerGames(playerId).map(ref => ref.gameId)
+    ]);
+    const code = this.generateUniqueLinkCode();
+    const expiresAt = linkCodeExpiresAtFromNow(this.env);
+    this.linkCodes[code] = {
+      code,
+      playerId,
+      playerName,
+      gameId,
+      gameIds,
+      createdAt: new Date().toISOString(),
+      expiresAt
+    };
+
+    await Promise.all([
+      this.state.storage.put(LINK_CODES_STORAGE_KEY, this.linkCodes),
+      this.scheduleAlarm()
+    ]);
+
+    return {
+      code: formatLinkCode(code),
+      expiresAt
+    };
+  }
+
+  async redeemLinkCode(input = {}) {
+    const code = normalizeLinkCode(input.code || input.linkCode);
+    if (!code) throw statusError("Link code is required", 400);
+
+    const link = this.linkCodes[code];
+    if (!link || isExpired(link.expiresAt)) {
+      if (link) {
+        delete this.linkCodes[code];
+        await Promise.all([
+          this.state.storage.put(LINK_CODES_STORAGE_KEY, this.linkCodes),
+          this.scheduleAlarm()
+        ]);
+      }
+      throw statusError("Link code not found", 404);
+    }
+
+    delete this.linkCodes[code];
+
+    const user = this.userSummary(link.playerId);
+    const recentGameIds = this.playerGames(link.playerId).map(ref => ref.gameId);
+    const storedGameIds = normalizeGameIds(link.gameIds);
+    const gameId = normalizeRoomId(link.gameId) || recentGameIds[0] || storedGameIds[0] || "";
+    const gameIds = normalizeGameIds([gameId, ...recentGameIds, ...storedGameIds]);
+
+    await Promise.all([
+      this.state.storage.put(LINK_CODES_STORAGE_KEY, this.linkCodes),
+      this.scheduleAlarm()
+    ]);
+
+    return {
+      playerId: link.playerId,
+      playerName: normalizePlayerName(link.playerName) || user?.name || "Player",
+      gameId,
+      gameIds
+    };
+  }
+
+  generateUniqueLinkCode() {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const code = generateLinkCode();
+      if (!this.linkCodes[code]) return code;
+    }
+    throw statusError("Unable to create a link code right now", 503);
   }
 
   rememberUser(player, gameId, createdAt, updatedAt) {
@@ -656,10 +759,12 @@ export class InviteInbox {
 
     delete this.inboxes[playerId];
     delete this.users[playerId];
+    this.removeLinkCodesForPlayer(playerId);
 
     await Promise.all([
       this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
       this.state.storage.put(USERS_STORAGE_KEY, this.users),
+      this.state.storage.put(LINK_CODES_STORAGE_KEY, this.linkCodes),
       this.scheduleAlarm()
     ]);
 
@@ -670,6 +775,19 @@ export class InviteInbox {
       gameCount: gameIds.length,
       games
     };
+  }
+
+  removeLinkCodesForPlayer(playerIdInput) {
+    const playerId = normalizePlayerId(playerIdInput);
+    if (!playerId) return 0;
+
+    let removed = 0;
+    for (const [code, link] of Object.entries(this.linkCodes || {})) {
+      if (normalizePlayerId(link?.playerId) !== playerId) continue;
+      delete this.linkCodes[code];
+      removed += 1;
+    }
+    return removed;
   }
 
   async sweepExpiredRefs(now = Date.now()) {
@@ -687,6 +805,12 @@ export class InviteInbox {
         delete this.inboxes[playerId];
         changed = true;
       }
+    }
+
+    for (const [code, link] of Object.entries(this.linkCodes || {})) {
+      if (!isExpired(link?.expiresAt, now)) continue;
+      delete this.linkCodes[code];
+      changed = true;
     }
 
     for (const [playerId, record] of Object.entries(this.users || {})) {
@@ -707,7 +831,8 @@ export class InviteInbox {
     if (changed) {
       await Promise.all([
         this.state.storage.put(INBOX_STORAGE_KEY, this.inboxes),
-        this.state.storage.put(USERS_STORAGE_KEY, this.users)
+        this.state.storage.put(USERS_STORAGE_KEY, this.users),
+        this.state.storage.put(LINK_CODES_STORAGE_KEY, this.linkCodes)
       ]);
     }
 
@@ -716,7 +841,7 @@ export class InviteInbox {
   }
 
   async scheduleAlarm() {
-    const next = nextInboxExpiry(this.inboxes);
+    const next = earliestExpiry(nextInboxExpiry(this.inboxes), nextLinkCodeExpiry(this.linkCodes));
     if (next) {
       await setStorageAlarm(this.state.storage, next);
     } else {
@@ -749,6 +874,13 @@ export default {
 
     const playerRoute = parsePlayerRoute(pathname);
     if (playerRoute) {
+      const id = env.INVITE_INBOX.idFromName("invites");
+      const inbox = env.INVITE_INBOX.get(id);
+      return inbox.fetch(request);
+    }
+
+    const linkRoute = parseLinkRoute(pathname);
+    if (linkRoute) {
       const id = env.INVITE_INBOX.idFromName("invites");
       const inbox = env.INVITE_INBOX.get(id);
       return inbox.fetch(request);
@@ -787,6 +919,12 @@ export function parsePlayerRoute(pathname) {
     playerId: normalizePlayerId(decodeURIComponent(match[1])),
     action: match[2]
   };
+}
+
+export function parseLinkRoute(pathname) {
+  if (/^\/link\/?$/.test(pathname)) return { action: "create" };
+  if (/^\/link\/redeem\/?$/.test(pathname)) return { action: "redeem" };
+  return null;
 }
 
 export function parseAdminRoute(pathname) {
@@ -918,8 +1056,22 @@ function syncCacheTtlMs(env = {}) {
   return DEFAULT_SYNC_CACHE_TTL_DAYS * DAY_MS;
 }
 
+function linkCodeTtlMs(env = {}) {
+  const configuredMs = Number.parseInt(env.LINK_CODE_TTL_MS, 10);
+  if (Number.isFinite(configuredMs) && configuredMs > 0) return configuredMs;
+
+  const configuredHours = Number.parseFloat(env.LINK_CODE_TTL_HOURS);
+  if (Number.isFinite(configuredHours) && configuredHours > 0) return Math.round(configuredHours * 60 * 60 * 1000);
+
+  return DEFAULT_LINK_CODE_TTL_HOURS * 60 * 60 * 1000;
+}
+
 function expiresAtFromNow(env = {}, now = Date.now()) {
   return new Date(now + syncCacheTtlMs(env)).toISOString();
+}
+
+function linkCodeExpiresAtFromNow(env = {}, now = Date.now()) {
+  return new Date(now + linkCodeTtlMs(env)).toISOString();
 }
 
 function isExpired(value, now = Date.now()) {
@@ -1048,9 +1200,43 @@ function normalizeStoredUsers(input = {}, inboxes = {}) {
   return users;
 }
 
+function normalizeStoredLinkCodes(input = {}, env = {}) {
+  const linkCodes = {};
+  if (!input || typeof input !== "object") return linkCodes;
+
+  const fallbackExpiresAt = linkCodeExpiresAtFromNow(env);
+  const fallbackCreatedAt = new Date().toISOString();
+  for (const [rawCode, value] of Object.entries(input)) {
+    const code = normalizeLinkCode(value?.code || rawCode);
+    const playerId = normalizePlayerId(value?.playerId || value?.id);
+    if (!code || !playerId || !value || typeof value !== "object") continue;
+
+    const gameId = normalizeRoomId(value?.gameId || value?.roomId);
+    linkCodes[code] = {
+      code,
+      playerId,
+      playerName: normalizePlayerName(value?.playerName || value?.name) || "Player",
+      gameId,
+      gameIds: normalizeGameIds([gameId, ...normalizeGameIds(value?.gameIds)]),
+      createdAt: validDateString(value?.createdAt) ? value.createdAt : fallbackCreatedAt,
+      expiresAt: validDateString(value?.expiresAt) ? value.expiresAt : fallbackExpiresAt
+    };
+  }
+
+  return linkCodes;
+}
+
 function normalizeGameIds(input = []) {
   if (!Array.isArray(input)) return [];
-  return input.map(normalizeRoomId).filter(Boolean);
+  const seen = new Set();
+  const gameIds = [];
+  for (const value of input) {
+    const gameId = normalizeRoomId(value);
+    if (!gameId || seen.has(gameId)) continue;
+    seen.add(gameId);
+    gameIds.push(gameId);
+  }
+  return gameIds;
 }
 
 function gameIdsFromInbox(inbox = {}) {
@@ -1065,6 +1251,24 @@ function nextInboxExpiry(inboxes = {}) {
       const timestamp = Date.parse(ref?.expiresAt || "");
       if (Number.isFinite(timestamp) && timestamp < next) next = timestamp;
     }
+  }
+  return Number.isFinite(next) ? new Date(next).toISOString() : "";
+}
+
+function nextLinkCodeExpiry(linkCodes = {}) {
+  let next = Infinity;
+  for (const link of Object.values(linkCodes || {})) {
+    const timestamp = Date.parse(link?.expiresAt || "");
+    if (Number.isFinite(timestamp) && timestamp < next) next = timestamp;
+  }
+  return Number.isFinite(next) ? new Date(next).toISOString() : "";
+}
+
+function earliestExpiry(...values) {
+  let next = Infinity;
+  for (const value of values) {
+    const timestamp = Date.parse(value || "");
+    if (Number.isFinite(timestamp) && timestamp < next) next = timestamp;
   }
   return Number.isFinite(next) ? new Date(next).toISOString() : "";
 }
@@ -1088,6 +1292,25 @@ function membershipDates(inbox = {}) {
 
 function validDateString(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function normalizeLinkCode(value) {
+  return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 32);
+}
+
+function formatLinkCode(value) {
+  const code = normalizeLinkCode(value);
+  return code.match(/.{1,4}/g)?.join("-") || "";
+}
+
+function generateLinkCode(length = LINK_CODE_LENGTH) {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  let code = "";
+  for (const byte of bytes) {
+    code += LINK_CODE_ALPHABET[byte % LINK_CODE_ALPHABET.length];
+  }
+  return code;
 }
 
 function compareAdminUsers(left, right) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GameRoom, InviteInbox, parseAdminRoute, parseGameRoute, parsePlayerRoute } from "../workers/game/src/index.js";
+import { GameRoom, InviteInbox, parseAdminRoute, parseGameRoute, parseLinkRoute, parsePlayerRoute } from "../workers/game/src/index.js";
 
 test("parseGameRoute recognizes game API routes", () => {
   assert.deepEqual(parseGameRoute("/game/join"), { roomId: "BOARD", action: "join" });
@@ -32,6 +32,14 @@ test("parsePlayerRoute recognizes player sync routes", () => {
   assert.deepEqual(parsePlayerRoute("/player/p1/delete"), { playerId: "p1", action: "delete" });
   assert.deepEqual(parsePlayerRoute("/player/player%201/invites"), { playerId: "player 1", action: "invites" });
   assert.equal(parsePlayerRoute("/player/p1/friends"), null);
+});
+
+test("parseLinkRoute recognizes device link routes", () => {
+  assert.deepEqual(parseLinkRoute("/link"), { action: "create" });
+  assert.deepEqual(parseLinkRoute("/link/"), { action: "create" });
+  assert.deepEqual(parseLinkRoute("/link/redeem"), { action: "redeem" });
+  assert.deepEqual(parseLinkRoute("/link/redeem/"), { action: "redeem" });
+  assert.equal(parseLinkRoute("/link/p1"), null);
 });
 
 test("parseAdminRoute recognizes admin user list route", () => {
@@ -131,6 +139,47 @@ test("InviteInbox can remove all refs for a game", async () => {
   assert.deepEqual(inbox.playerGames("p1"), []);
   assert.deepEqual(inbox.playerGames("p2"), []);
   assert.deepEqual(inbox.listUsers(), []);
+});
+
+test("InviteInbox link codes redeem with latest server game refs and only work once", async () => {
+  const storage = new MemoryStorage();
+  const inbox = new InviteInbox({ storage }, {});
+  await inbox.ready;
+
+  await inbox.addGameRefs({
+    gameId: "ABC123",
+    players: [{ id: "p1", name: "Ada" }],
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  });
+
+  const created = await inbox.createLinkCode({
+    playerId: "p1",
+    name: "Ada",
+    gameId: "ABC123",
+    gameIds: ["ABC123"]
+  });
+
+  assert.match(created.code, /^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+
+  await inbox.addGameRefs({
+    gameId: "DEF456",
+    players: [{ id: "p1", name: "Ada" }],
+    updatedAt: "2026-01-02T00:00:00.000Z"
+  });
+
+  const redeemed = await inbox.redeemLinkCode({ code: created.code });
+
+  assert.deepEqual(redeemed, {
+    playerId: "p1",
+    playerName: "Ada",
+    gameId: "ABC123",
+    gameIds: ["ABC123", "DEF456"]
+  });
+
+  await assert.rejects(
+    () => inbox.redeemLinkCode({ code: created.code }),
+    error => error?.status === 404
+  );
 });
 
 test("GameRoom expires cached game state and can rehydrate from client state", async () => {
