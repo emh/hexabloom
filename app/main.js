@@ -29,7 +29,7 @@ import { createInitialState, loadAppState, saveAppState } from "./storage.js";
 import { GameSync, createRemoteLinkCode, deleteRemoteAccount, deleteRemoteGame, fetchPlayerGameRefs, fetchRemoteGameState, joinRemoteGame, redeemRemoteLinkCode, remoteGameExists, removeRemotePlayer, resignRemoteGame } from "./sync.js";
 
 const HEX_SIZE = 34;
-const MIN_SCALE = 0.16;
+const MIN_SCALE = 0.01;
 const MAX_SCALE = 2.4;
 const TILE_LETTER_MIN_SCREEN_RADIUS = 9;
 const TILE_VALUE_MIN_SCREEN_RADIUS = 13;
