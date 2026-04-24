@@ -29,8 +29,10 @@ import { createInitialState, loadAppState, saveAppState } from "./storage.js";
 import { GameSync, createRemoteLinkCode, deleteRemoteAccount, deleteRemoteGame, fetchPlayerGameRefs, fetchRemoteGameState, joinRemoteGame, redeemRemoteLinkCode, remoteGameExists, removeRemotePlayer, resignRemoteGame } from "./sync.js";
 
 const HEX_SIZE = 34;
-const MIN_SCALE = 0.35;
+const MIN_SCALE = 0.16;
 const MAX_SCALE = 2.4;
+const TILE_LETTER_MIN_SCREEN_RADIUS = 9;
+const TILE_VALUE_MIN_SCREEN_RADIUS = 13;
 const SQRT3 = Math.sqrt(3);
 const THEME_STORAGE_KEY = "hexabloom_theme";
 const THEME_COLORS = {
@@ -2529,6 +2531,9 @@ function drawTileCell(cell, options = {}, colors = getCanvasTheme()) {
   const fill = options.staged ? colors.tileFace : colorToRgba(color, fillAlpha);
   const stroke = color;
   const point = hexToPixel(cell);
+  const screenRadius = HEX_SIZE * 0.88 * ui.camera.scale;
+  const showLetter = screenRadius >= TILE_LETTER_MIN_SCREEN_RADIUS;
+  const showValue = screenRadius >= TILE_VALUE_MIN_SCREEN_RADIUS;
 
   ctx.save();
   if (options.staged) {
@@ -2544,14 +2549,21 @@ function drawTileCell(cell, options = {}, colors = getCanvasTheme()) {
   ctx.lineWidth = options.staged ? 2 : 1.4;
   ctx.stroke();
 
-  ctx.fillStyle = colors.tileText;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = "600 28px 'Crimson Pro', Georgia, serif";
-  ctx.fillText(cell.letter, point.x, point.y - 1);
-  ctx.fillStyle = colors.tileSubtext;
-  ctx.font = "10px 'SF Mono', Menlo, monospace";
-  ctx.fillText(String(cell.value), point.x, point.y + 18);
+  if (showLetter) {
+    ctx.fillStyle = colors.tileText;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "600 28px 'Crimson Pro', Georgia, serif";
+    ctx.fillText(cell.letter, point.x, point.y - 1);
+  }
+
+  if (showValue) {
+    ctx.fillStyle = colors.tileSubtext;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "10px 'SF Mono', Menlo, monospace";
+    ctx.fillText(String(cell.value), point.x, point.y + 18);
+  }
   ctx.restore();
 }
 
