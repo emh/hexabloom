@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  BLOOM_BONUS,
   BONUS_TYPES,
   GameRuleError,
   LETTER_DISTRIBUTION,
@@ -199,6 +200,35 @@ test("new games seed bonus spaces, but existing boards do not reveal old ones", 
 
   assert.ok(Object.keys(fresh.bonusSpaces).length > 0);
   assert.deepEqual(migrated.bonusSpaces, {});
+});
+
+test("completing a hollow ring creates a bloom and awards a bloom bonus", () => {
+  const game = gameWithPlayers();
+  forceRack(game, "p1", ["F"]);
+  forceRack(game, "p2", []);
+  game.board = {
+    "1,0": { q: 1, r: 0, letter: "A", value: 1, playerId: "p2", tileId: "a", timestamp: 1 },
+    "1,-1": { q: 1, r: -1, letter: "B", value: 1, playerId: "p2", tileId: "b", timestamp: 1 },
+    "0,-1": { q: 0, r: -1, letter: "C", value: 1, playerId: "p2", tileId: "c", timestamp: 1 },
+    "-1,0": { q: -1, r: 0, letter: "D", value: 1, playerId: "p2", tileId: "d", timestamp: 1 },
+    "-1,1": { q: -1, r: 1, letter: "E", value: 1, playerId: "p2", tileId: "e", timestamp: 1 }
+  };
+
+  const validation = validateMove(game, createMove("p1", [
+    { q: 0, r: 1, tileId: "p1-0" }
+  ], 100), allowWords(["EF", "FA"]));
+
+  assert.equal(validation.score, 2 + 2 + 1 + BLOOM_BONUS);
+  assert.deepEqual(validation.scoreBreakdown.bonuses, [`+${BLOOM_BONUS} bloom`, "+1 combo"]);
+  assert.deepEqual(validation.newBlooms.map(bloom => bloom.key), ["0,0"]);
+
+  const result = applyMove(game, createMove("p1", [
+    { q: 0, r: 1, tileId: "p1-0" }
+  ], 100), allowWords(["EF", "FA"]));
+
+  assert.equal(result.state.players.p1.score, 2 + 2 + 1 + BLOOM_BONUS);
+  assert.equal(result.state.blooms["0,0"].playerId, "p1");
+  assert.deepEqual(result.move.blooms.map(bloom => bloom.key), ["0,0"]);
 });
 
 test("createPlayer deals eleven rack tiles and a remaining bag", () => {

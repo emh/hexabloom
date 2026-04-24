@@ -1015,12 +1015,18 @@ function formatScoreBreakdown(scoreBreakdown, options = {}) {
   const seen = new Map();
   for (const bonus of scoreBreakdown.bonuses || []) {
     const descriptor = describeScoreBonus(bonus, options);
-    if (!seen.has(descriptor.key)) seen.set(descriptor.key, { label: descriptor.label, count: 0 });
+    if (!seen.has(descriptor.key)) {
+      seen.set(descriptor.key, {
+        label: descriptor.label,
+        count: 0,
+        countSeparator: descriptor.countSeparator || ""
+      });
+    }
     seen.get(descriptor.key).count += 1;
   }
 
-  for (const { label, count } of seen.values()) {
-    parts.push(count > 1 ? `${label}x${count}` : label);
+  for (const { label, count, countSeparator } of seen.values()) {
+    parts.push(count > 1 ? `${label}${countSeparator}x${count}` : label);
   }
 
   return parts.join(" · ");
@@ -1042,6 +1048,15 @@ function describeScoreBonus(bonus, options = {}) {
     return {
       key: `length:${value}`,
       label: value
+    };
+  }
+
+  const bloomMatch = /^(?<amount>\+\d+)\s+bloom$/i.exec(value);
+  if (bloomMatch) {
+    return {
+      key: `bloom:${bloomMatch.groups.amount}`,
+      label: `${bloomMatch.groups.amount} bloom`,
+      countSeparator: " "
     };
   }
 
@@ -2324,12 +2339,18 @@ function drawBoard() {
   const preview = getPreview();
   const previewKeys = new Set(preview.validation?.words.flatMap(word => word.keys) || []);
   const draftBoard = preview.validation?.draftBoard || boardWithStaged();
+  const previewBloomKeys = new Set((preview.validation?.newBlooms || []).map(bloom => bloom.key));
+  const blooms = { ...(game.blooms || {}) };
+  for (const bloom of preview.validation?.newBlooms || []) {
+    blooms[bloom.key] = bloom;
+  }
 
   ctx.save();
   ctx.translate(ui.camera.x, ui.camera.y);
   ctx.scale(ui.camera.scale, ui.camera.scale);
 
   drawGrid(previewKeys, colors);
+  drawBlooms(draftBoard, blooms, previewBloomKeys, colors);
   drawCells(draftBoard, previewKeys, colors);
 
   if (ui.hoverHex && (!ui.dragging || ui.dragging.valid)) {
@@ -2372,6 +2393,133 @@ function drawCells(board, previewKeys, colors) {
   for (const cell of cells) {
     const staged = ui.staged.some(placement => placement.tileId === cell.tileId);
     drawTileCell(cell, { staged, highlighted: previewKeys.has(hexKey(cell.q, cell.r)) }, colors);
+  }
+}
+
+function drawBlooms(board, blooms = {}, previewBloomKeys = new Set(), colors = getCanvasTheme()) {
+  const ordered = Object.values(blooms)
+    .filter(bloom => bloom?.key && !board[bloom.key])
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.createdAt || "") || 0;
+      const rightTime = Date.parse(right.createdAt || "") || 0;
+      return leftTime - rightTime || left.key.localeCompare(right.key);
+    });
+
+  for (const bloom of ordered) {
+    drawBloomFlower(bloom, { preview: previewBloomKeys.has(bloom.key) }, colors);
+  }
+}
+
+function drawBloomFlower(bloom, options = {}, colors = getCanvasTheme()) {
+  const point = hexToPixel(bloom);
+  const random = seededCanvasRandom(bloomSeedValue(bloom));
+  const petalCount = 5 + Math.floor(random() * 4);
+  const innerPetalCount = Math.max(3, petalCount - 2);
+  const petalLength = HEX_SIZE * (0.26 + random() * 0.08);
+  const petalWidth = HEX_SIZE * (0.11 + random() * 0.04);
+  const innerLength = petalLength * (0.6 + random() * 0.12);
+  const innerWidth = petalWidth * (0.72 + random() * 0.12);
+  const centerRadius = HEX_SIZE * (0.11 + random() * 0.04);
+  const petalHue = Math.floor(random() * 360);
+  const innerHue = (petalHue + 20 + Math.floor(random() * 50)) % 360;
+  const leafHue = (petalHue + 105 + Math.floor(random() * 40)) % 360;
+  const petalSaturation = 58 + Math.floor(random() * 24);
+  const petalLightness = 56 + Math.floor(random() * 14);
+  const centerHue = 34 + Math.floor(random() * 18);
+  const rotation = random() * Math.PI * 2;
+  const previewAlpha = options.preview ? 0.72 : 0.92;
+
+  ctx.save();
+  drawHexPath(point.x, point.y, HEX_SIZE * 0.72);
+  ctx.clip();
+
+  const wash = ctx.createRadialGradient(point.x, point.y, centerRadius * 0.2, point.x, point.y, HEX_SIZE * 0.62);
+  wash.addColorStop(0, `hsla(${petalHue}, ${petalSaturation}%, ${petalLightness + 4}%, ${previewAlpha * 0.18})`);
+  wash.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = wash;
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, HEX_SIZE * 0.62, 0, Math.PI * 2);
+  ctx.fill();
+
+  drawBloomLeaves(point, rotation, leafHue, previewAlpha);
+  drawBloomPetalRing(point, petalCount, rotation, petalLength, petalWidth, petalHue, petalSaturation, petalLightness, previewAlpha);
+  drawBloomPetalRing(
+    point,
+    innerPetalCount,
+    rotation + Math.PI / petalCount,
+    innerLength,
+    innerWidth,
+    innerHue,
+    Math.max(40, petalSaturation - 10),
+    Math.min(78, petalLightness + 8),
+    previewAlpha * 0.96
+  );
+
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, centerRadius * 1.18, 0, Math.PI * 2);
+  ctx.fillStyle = `hsla(${centerHue}, 82%, 58%, ${previewAlpha})`;
+  ctx.fill();
+  ctx.lineWidth = 1 / ui.camera.scale;
+  ctx.strokeStyle = colors.tileText;
+  ctx.globalAlpha = 0.16 * previewAlpha;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  const stamenCount = 6 + Math.floor(random() * 5);
+  for (let index = 0; index < stamenCount; index += 1) {
+    const angle = rotation + (Math.PI * 2 * index) / stamenCount + random() * 0.3;
+    const distance = centerRadius * (0.25 + random() * 0.5);
+    const dotRadius = centerRadius * (0.12 + random() * 0.08);
+    ctx.beginPath();
+    ctx.arc(
+      point.x + Math.cos(angle) * distance,
+      point.y + Math.sin(angle) * distance,
+      dotRadius,
+      0,
+      Math.PI * 2
+    );
+    ctx.fillStyle = `hsla(${centerHue + 12}, 94%, 72%, ${previewAlpha})`;
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawBloomLeaves(point, rotation, hue, alpha) {
+  const leafCount = 2;
+  for (let index = 0; index < leafCount; index += 1) {
+    const angle = rotation + Math.PI * (0.7 + index * 0.34);
+    ctx.save();
+    ctx.translate(point.x, point.y);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0, 2);
+    ctx.bezierCurveTo(6, 2, 11, 12, 0, 18);
+    ctx.bezierCurveTo(-11, 12, -6, 2, 0, 2);
+    ctx.closePath();
+    ctx.fillStyle = `hsla(${hue}, 42%, 46%, ${alpha * 0.42})`;
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawBloomPetalRing(point, count, rotation, length, width, hue, saturation, lightness, alpha) {
+  for (let index = 0; index < count; index += 1) {
+    const angle = rotation + (Math.PI * 2 * index) / count;
+    ctx.save();
+    ctx.translate(point.x, point.y);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(width, -length * 0.2, width * 0.8, -length, 0, -length);
+    ctx.bezierCurveTo(-width * 0.8, -length, -width, -length * 0.2, 0, 0);
+    ctx.closePath();
+    ctx.fillStyle = `hsla(${hue}, ${saturation}%, ${lightness}%, ${alpha})`;
+    ctx.fill();
+    ctx.lineWidth = 0.8 / ui.camera.scale;
+    ctx.strokeStyle = `hsla(${hue}, ${Math.max(28, saturation - 14)}%, ${Math.max(30, lightness - 22)}%, ${alpha * 0.28})`;
+    ctx.stroke();
+    ctx.restore();
   }
 }
 
@@ -2492,6 +2640,32 @@ function hashToPaletteIndex(value, length) {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0) % length;
+}
+
+function hashCanvasSeed(value) {
+  let hash = 2166136261;
+  for (const char of String(value || "")) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function seededCanvasRandom(seedValue) {
+  let seed = hashCanvasSeed(seedValue) || 1;
+  return () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+}
+
+function bloomSeedValue(bloom = {}) {
+  return [
+    bloom.key || hexKey(bloom.q, bloom.r),
+    bloom.playerId || "",
+    bloom.moveId || "",
+    bloom.createdAt || ""
+  ].join(":");
 }
 
 function getCanvasTheme() {

@@ -3,6 +3,7 @@ export const INITIAL_RADIUS = 5;
 export const RACK_SIZE = 11;
 export const GLOBAL_ROOM_ID = "BOARD";
 export const DEFAULT_GAME_LENGTH = "short";
+export const BLOOM_BONUS = 12;
 
 export const GAME_LENGTHS = Object.freeze({
   short: Object.freeze({ key: "short", label: "Short", tileBagCount: 1 }),
@@ -268,6 +269,7 @@ export function createGameState(input = {}) {
   if (!hasStoredBonusSpaces && !Object.keys(board).length) {
     Object.assign(bonusSpaces, generateBonusSpacesForBounds(bounds, board, bonusSeed));
   }
+  const blooms = normalizeBlooms(input.blooms, board, bounds);
 
   return {
     id: normalizeRoomId(input.id),
@@ -277,6 +279,7 @@ export function createGameState(input = {}) {
     board,
     bonusSeed,
     bonusSpaces,
+    blooms,
     players,
     removedPlayers,
     moves: Array.isArray(input.moves) ? input.moves.map(normalizeMoveRecord).filter(Boolean) : [],
@@ -415,6 +418,14 @@ export function applyMove(inputState, inputMove, options = {}) {
     ...validation.move,
     playerName: player.name,
     score: validation.score,
+    blooms: validation.newBlooms.map(bloom => ({
+      q: bloom.q,
+      r: bloom.r,
+      key: bloom.key,
+      playerId: bloom.playerId,
+      moveId: bloom.moveId,
+      createdAt: bloom.createdAt
+    })),
     words: validation.words.map(word => ({
       text: word.text,
       value: word.value,
@@ -426,7 +437,13 @@ export function applyMove(inputState, inputMove, options = {}) {
     scoreBreakdown: validation.scoreBreakdown
   };
 
+  for (const placement of validation.move.placements) {
+    delete state.blooms[hexKey(placement.q, placement.r)];
+  }
   state.moves.push(moveRecord);
+  for (const bloom of validation.newBlooms) {
+    state.blooms[bloom.key] = bloom;
+  }
   state.bounds = recomputeBoardBounds(state.board);
   state.bonusSpaces = advanceBonusSpaces(
     state.bonusSpaces,
@@ -495,7 +512,8 @@ export function validateMove(inputState, inputMove, options = {}) {
 
   validateDictionaryWords(words, options);
 
-  const scoring = scoreMove(words, move.placements, tilesById, state.bonusSpaces, options);
+  const newBlooms = findNewBlooms(state.board, draftBoard, move.placements, state.blooms, move, player);
+  const scoring = scoreMove(words, move.placements, tilesById, state.bonusSpaces, newBlooms, options);
 
   return {
     move,
@@ -505,7 +523,8 @@ export function validateMove(inputState, inputMove, options = {}) {
     score: scoring.score,
     scoreBreakdown: scoring.scoreBreakdown,
     tilesById,
-    draftBoard
+    draftBoard,
+    newBlooms
   };
 }
 
@@ -722,6 +741,7 @@ function normalizeMoveRecord(input = {}) {
     ...normalizeMove(input),
     playerName: normalizePlayerName(input.playerName),
     score: Math.max(0, Number.parseInt(input.score, 10) || 0),
+    blooms: Array.isArray(input.blooms) ? input.blooms.map(normalizeBloomRecord).filter(Boolean) : [],
     words: Array.isArray(input.words) ? input.words.map(normalizeMoveWordRecord).filter(Boolean) : [],
     scoreBreakdown: normalizeScoreBreakdown(input.scoreBreakdown, input.score)
   };
@@ -758,10 +778,18 @@ function redactPlayerDataFromGame(state, playerId) {
     cell.tileId = "";
   }
 
+  for (const bloom of Object.values(state.blooms || {})) {
+    if (bloom.playerId !== playerId) continue;
+    bloom.playerId = "";
+  }
+
   for (const move of state.moves) {
     if (move.playerId !== playerId) continue;
     move.playerId = "";
     move.playerName = "deleted player";
+    for (const bloom of move.blooms || []) {
+      bloom.playerId = "";
+    }
     for (const placement of move.placements || []) {
       placement.tileId = "";
     }
@@ -850,6 +878,22 @@ function normalizeBonusSpaces(input = {}, board = {}, bounds = initialBounds()) 
   return bonusSpaces;
 }
 
+function normalizeBlooms(input = {}, board = {}, bounds = initialBounds()) {
+  const blooms = {};
+  if (!input || typeof input !== "object") return blooms;
+
+  const entries = Array.isArray(input)
+    ? input.map(bloom => [bloom?.key || hexKey(bloom?.q, bloom?.r), bloom])
+    : Object.entries(input);
+  for (const [rawKey, bloom] of entries) {
+    const normalized = normalizeBloomRecord({ key: rawKey, ...bloom }, board, bounds);
+    if (!normalized) continue;
+    blooms[normalized.key] = normalized;
+  }
+
+  return blooms;
+}
+
 function normalizeBonusType(value) {
   const type = String(value || "").trim().toLowerCase();
   if (type === BONUS_TYPES.DOUBLE_LETTER) return BONUS_TYPES.DOUBLE_LETTER;
@@ -900,21 +944,24 @@ function advanceBonusSpaces(currentBonusSpaces = {}, placements, board, previous
   return normalizeBonusSpaces(nextBonusSpaces, board, nextBounds);
 }
 
-function scoreMove(words, placements, tilesById, bonusSpaces = {}, options = {}) {
+function scoreMove(words, placements, tilesById, bonusSpaces = {}, newBlooms = [], options = {}) {
+  const bloomBonus = newBlooms.length * BLOOM_BONUS;
   if (words.length) {
     const placementKeys = new Set(placements.map(placement => hexKey(placement.q, placement.r)));
     const scoredWords = words.map(word => scoreWord(word, placementKeys, bonusSpaces, options));
     const multiWordBonus = multiWordPlayBonus(scoredWords.length);
     const bonuses = scoredWords.flatMap(word => word.bonuses);
+    for (let index = 0; index < newBlooms.length; index += 1) bonuses.push(`+${BLOOM_BONUS} bloom`);
     if (multiWordBonus) bonuses.push(`+${multiWordBonus} combo`);
 
-    const score = scoredWords.reduce((sum, word) => sum + word.score, 0) + multiWordBonus;
+    const score = scoredWords.reduce((sum, word) => sum + word.score, 0) + multiWordBonus + bloomBonus;
     return {
       words: scoredWords,
       score,
       scoreBreakdown: {
         total: score,
         multiWordBonus,
+        bloomBonus,
         bonuses,
         reverseWords: scoredWords
           .filter(word => word.reverseText)
@@ -934,6 +981,8 @@ function scoreMove(words, placements, tilesById, bonusSpaces = {}, options = {})
     bonuses.push(bonusCode(bonusType));
     score *= bonusMultiplier(bonusType);
   }
+  for (let index = 0; index < newBlooms.length; index += 1) bonuses.push(`+${BLOOM_BONUS} bloom`);
+  score += bloomBonus;
 
   return {
     words: [],
@@ -941,6 +990,7 @@ function scoreMove(words, placements, tilesById, bonusSpaces = {}, options = {})
     scoreBreakdown: {
       total: score,
       multiWordBonus: 0,
+      bloomBonus,
       bonuses,
       reverseWords: []
     }
@@ -1037,6 +1087,7 @@ function normalizeScoreBreakdown(input = {}, fallbackScore = 0) {
   return {
     total: Math.max(0, Number.parseInt(input?.total, 10) || Number.parseInt(fallbackScore, 10) || 0),
     multiWordBonus: Math.max(0, Number.parseInt(input?.multiWordBonus, 10) || 0),
+    bloomBonus: Math.max(0, Number.parseInt(input?.bloomBonus, 10) || 0),
     bonuses: Array.isArray(input?.bonuses)
       ? input.bonuses.map(value => String(value || "").trim()).filter(Boolean)
       : [],
@@ -1051,6 +1102,58 @@ function normalizeReverseWordRecord(input = {}) {
   const reverse = normalizeWord(input?.reverse);
   if (!word || !reverse) return null;
   return { word, reverse };
+}
+
+function normalizeBloomRecord(input = {}, board = null, bounds = null) {
+  const q = Number.isFinite(Number(input?.q)) ? Number(input.q) : parseHexKey(input?.key || "").q;
+  const r = Number.isFinite(Number(input?.r)) ? Number(input.r) : parseHexKey(input?.key || "").r;
+  if (!Number.isInteger(q) || !Number.isInteger(r)) return null;
+
+  const key = hexKey(q, r);
+  if (bounds && !isWithinBounds({ q, r }, bounds)) return null;
+  if (board && board[key]) return null;
+
+  return {
+    q,
+    r,
+    key,
+    playerId: String(input?.playerId || "").trim().slice(0, 128),
+    moveId: String(input?.moveId || "").trim().slice(0, 128),
+    createdAt: typeof input?.createdAt === "string" ? input.createdAt : ""
+  };
+}
+
+function findNewBlooms(previousBoard = {}, nextBoard = {}, placements = [], existingBlooms = {}, move = {}, player = {}) {
+  const newBlooms = [];
+  const seen = new Set();
+
+  for (const placement of placements) {
+    for (const center of neighbors(placement)) {
+      const key = hexKey(center.q, center.r);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (existingBlooms?.[key]) continue;
+      if (nextBoard[key]) continue;
+      if (!isBloomCenter(nextBoard, center)) continue;
+      if (isBloomCenter(previousBoard, center)) continue;
+
+      newBlooms.push({
+        q: center.q,
+        r: center.r,
+        key,
+        playerId: String(player?.id || "").trim().slice(0, 128),
+        moveId: String(move?.id || "").trim().slice(0, 128),
+        createdAt: new Date(Number(move?.timestamp) || Date.now()).toISOString()
+      });
+    }
+  }
+
+  return newBlooms.sort((left, right) => left.q - right.q || left.r - right.r);
+}
+
+function isBloomCenter(board = {}, center = {}) {
+  if (!center || board[hexKey(center.q, center.r)]) return false;
+  return neighbors(center).every(hex => Boolean(board[hexKey(hex.q, hex.r)]));
 }
 
 function validateDictionaryWords(words, options = {}) {
