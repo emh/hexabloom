@@ -911,13 +911,13 @@ function renderLeaderboard() {
     </div>
   `).join("") : '<p class="leaderboard-empty">No players yet.</p>';
   const historyRows = entries.length ? entries.map(entry => `
-    <div class="history-row">
+    <button class="history-row history-jump" type="button" data-action="focus-history-move" data-move-index="${entry.moveIndex}">
       <span class="history-index">${entry.index}</span>
       <strong class="history-words">${renderWordListHtml(entry.displayWords)}</strong>
       <span class="history-player">${esc(entry.playerName)}</span>
       <span class="history-bonuses">${entry.bonuses ? esc(entry.bonuses) : "-"}</span>
       <span class="history-score">${entry.score}</span>
-    </div>
+    </button>
   `).join("") : '<p class="leaderboard-empty">No words yet.</p>';
 
   const leaderboardSection = `
@@ -970,13 +970,18 @@ function moveHistoryEntries() {
     const primaryIndex = primaryWordIndex(move, words);
     const player = game.players?.[move.playerId];
     const scoreBreakdown = moveScoreBreakdown(move);
+    const focusKeys = primaryIndex >= 0
+      ? words[primaryIndex]?.keys || []
+      : (move.placements || []).map(placement => hexKey(placement.q, placement.r));
 
     return {
       index: index + 1,
+      moveIndex: index,
       displayWords: orderedWordsForDisplay(move, words),
       playerName: move.playerName || player?.name || "unknown",
       bonuses: formatScoreBreakdown(scoreBreakdown, { includeTotal: false, compactCombo: true }),
-      score: Math.max(0, Number.parseInt(move.score, 10) || 0)
+      score: Math.max(0, Number.parseInt(move.score, 10) || 0),
+      focusKeys
     };
   }).reverse();
 }
@@ -1012,10 +1017,14 @@ function moveScoreBreakdown(move) {
 
 function formatScoreBreakdown(scoreBreakdown, options = {}) {
   const parts = [];
-  if (options.includeTotal !== false) parts.push(`+${scoreBreakdown.total || 0}`);
+  const hiddenBloomBonus = options.hideBloomBonus ? Math.max(0, Number(scoreBreakdown.bloomBonus) || 0) : 0;
+  if (options.includeTotal !== false) {
+    parts.push(`+${Math.max(0, (scoreBreakdown.total || 0) - hiddenBloomBonus)}`);
+  }
 
   const seen = new Map();
   for (const bonus of scoreBreakdown.bonuses || []) {
+    if (options.hideBloomBonus && /^\+\d+\s+bloom$/i.test(String(bonus || "").trim())) continue;
     const descriptor = describeScoreBonus(bonus, options);
     if (!seen.has(descriptor.key)) {
       seen.set(descriptor.key, {
@@ -1085,6 +1094,52 @@ function renderWordHtml(word = {}) {
   const reverse = String(word?.reverseText || "").trim();
   if (!reverse) return text;
   return `${text}<span class="word-reverse">⇄ ${esc(reverse)}</span>`;
+}
+
+function focusHistoryMove(moveIndexInput) {
+  const moveIndex = Number.parseInt(moveIndexInput, 10);
+  if (!Number.isInteger(moveIndex) || moveIndex < 0 || moveIndex >= (game?.moves?.length || 0)) return;
+
+  const move = game.moves[moveIndex];
+  const words = moveWords(move);
+  const primaryIndex = primaryWordIndex(move, words);
+  const focusKeys = primaryIndex >= 0
+    ? words[primaryIndex]?.keys || []
+    : (move.placements || []).map(placement => hexKey(placement.q, placement.r));
+  centerCameraOnKeys(focusKeys);
+  ui.leaderboardOpen = false;
+  ui.historyOpen = false;
+  save();
+  renderAll();
+}
+
+function centerCameraOnKeys(keys = []) {
+  const points = keys
+    .map(key => {
+      const boardCell = game?.board?.[key];
+      if (boardCell) return hexToPixel(boardCell);
+      const { q, r } = parseHistoryHexKey(key);
+      return Number.isInteger(q) && Number.isInteger(r) ? hexToPixel({ q, r }) : null;
+    })
+    .filter(Boolean);
+  if (!points.length) return;
+
+  const center = points.reduce((sum, point) => ({
+    x: sum.x + point.x,
+    y: sum.y + point.y
+  }), { x: 0, y: 0 });
+  center.x /= points.length;
+  center.y /= points.length;
+
+  ui.camera.x = ui.canvasSize.width / 2 - center.x * ui.camera.scale;
+  ui.camera.y = ui.canvasSize.height / 2 - center.y * ui.camera.scale;
+  ui.cameraNeedsCenter = false;
+  scheduleDraw();
+}
+
+function parseHistoryHexKey(key) {
+  const [q, r] = String(key || "").split(",").map(Number);
+  return { q, r };
 }
 
 function primaryWordIndex(move, words) {
@@ -1287,7 +1342,7 @@ function getPreview() {
       validation,
       message: words || "Single tile",
       messageHtml: renderWordListHtml(orderedWordsForDisplay(validation.move, validation.words)),
-      detail: formatScoreBreakdown(validation.scoreBreakdown)
+      detail: formatScoreBreakdown(validation.scoreBreakdown, { hideBloomBonus: true })
     };
   } catch (error) {
     return {
@@ -2417,11 +2472,11 @@ function drawBloomFlower(bloom, options = {}, colors = getCanvasTheme()) {
   const random = seededCanvasRandom(bloomSeedValue(bloom));
   const petalCount = 5 + Math.floor(random() * 4);
   const innerPetalCount = Math.max(3, petalCount - 2);
-  const petalLength = HEX_SIZE * (0.26 + random() * 0.08);
-  const petalWidth = HEX_SIZE * (0.11 + random() * 0.04);
-  const innerLength = petalLength * (0.6 + random() * 0.12);
-  const innerWidth = petalWidth * (0.72 + random() * 0.12);
-  const centerRadius = HEX_SIZE * (0.11 + random() * 0.04);
+  const petalLength = HEX_SIZE * (0.46 + random() * 0.14);
+  const petalWidth = HEX_SIZE * (0.18 + random() * 0.07);
+  const innerLength = petalLength * (0.62 + random() * 0.16);
+  const innerWidth = petalWidth * (0.68 + random() * 0.16);
+  const centerRadius = HEX_SIZE * (0.15 + random() * 0.05);
   const petalHue = Math.floor(random() * 360);
   const innerHue = (petalHue + 20 + Math.floor(random() * 50)) % 360;
   const leafHue = (petalHue + 105 + Math.floor(random() * 40)) % 360;
@@ -2432,15 +2487,15 @@ function drawBloomFlower(bloom, options = {}, colors = getCanvasTheme()) {
   const previewAlpha = options.preview ? 0.72 : 0.92;
 
   ctx.save();
-  drawHexPath(point.x, point.y, HEX_SIZE * 0.72);
+  drawHexPath(point.x, point.y, HEX_SIZE * 0.88);
   ctx.clip();
 
-  const wash = ctx.createRadialGradient(point.x, point.y, centerRadius * 0.2, point.x, point.y, HEX_SIZE * 0.62);
-  wash.addColorStop(0, `hsla(${petalHue}, ${petalSaturation}%, ${petalLightness + 4}%, ${previewAlpha * 0.18})`);
+  const wash = ctx.createRadialGradient(point.x, point.y, centerRadius * 0.2, point.x, point.y, HEX_SIZE * 0.84);
+  wash.addColorStop(0, `hsla(${petalHue}, ${petalSaturation}%, ${petalLightness + 4}%, ${previewAlpha * 0.26})`);
   wash.addColorStop(1, "rgba(255,255,255,0)");
   ctx.fillStyle = wash;
   ctx.beginPath();
-  ctx.arc(point.x, point.y, HEX_SIZE * 0.62, 0, Math.PI * 2);
+  ctx.arc(point.x, point.y, HEX_SIZE * 0.84, 0, Math.PI * 2);
   ctx.fill();
 
   drawBloomLeaves(point, rotation, leafHue, previewAlpha);
@@ -2489,15 +2544,17 @@ function drawBloomFlower(bloom, options = {}, colors = getCanvasTheme()) {
 
 function drawBloomLeaves(point, rotation, hue, alpha) {
   const leafCount = 2;
+  const leafWidth = HEX_SIZE * 0.18;
+  const leafLength = HEX_SIZE * 0.54;
   for (let index = 0; index < leafCount; index += 1) {
     const angle = rotation + Math.PI * (0.7 + index * 0.34);
     ctx.save();
     ctx.translate(point.x, point.y);
     ctx.rotate(angle);
     ctx.beginPath();
-    ctx.moveTo(0, 2);
-    ctx.bezierCurveTo(6, 2, 11, 12, 0, 18);
-    ctx.bezierCurveTo(-11, 12, -6, 2, 0, 2);
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(leafWidth, 0, leafWidth * 1.15, leafLength * 0.58, 0, leafLength);
+    ctx.bezierCurveTo(-leafWidth * 1.15, leafLength * 0.58, -leafWidth, 0, 0, 0);
     ctx.closePath();
     ctx.fillStyle = `hsla(${hue}, 42%, 46%, ${alpha * 0.42})`;
     ctx.fill();
@@ -3093,6 +3150,11 @@ function wireEvents() {
     const action = target?.dataset.action;
     if (action === "remove-player") {
       removePlayerFromCurrentGame(target.closest("[data-player-id]")?.dataset.playerId);
+      return;
+    }
+
+    if (action === "focus-history-move") {
+      focusHistoryMove(target.dataset.moveIndex);
       return;
     }
 
